@@ -846,11 +846,20 @@ async fn handle_socket(
                     };
                     if let Err(e) = sink.send(Message::Binary(msg)).await {
                         let error_message = format!("WebSocket send error: {}", e);
-                        error!(
-                            message = %error_message,
-                            event = "websocket_send_error",
-                            error = %e
-                        );
+                        let error_str = e.to_string();
+                        if error_str.contains("Sending after closing") {
+                            warn!(
+                                message = %error_message,
+                                event = "websocket_send_after_close",
+                                error = %e
+                            );
+                        } else {
+                            error!(
+                                message = %error_message,
+                                event = "websocket_send_error",
+                                error = %e
+                            );
+                        }
                         break;
                     }
                 }
@@ -944,6 +953,11 @@ async fn handle_socket(
             }
         }
     }
+
+    // Close状態でのメッセージ送信を防ぐため、即座にDocConnectionをdropする
+    // これによりclosedフラグがセットされ、サブスクリプションコールバックが
+    // 新しいメッセージをキューするのを止める
+    drop(connection);
 }
 
 async fn check_store(
