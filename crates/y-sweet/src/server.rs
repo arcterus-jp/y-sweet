@@ -68,14 +68,26 @@ impl IntoResponse for AppError {
         let error_message = format!("{}", self.1);
         let error_debug = format!("{:?}", self.1);
 
-        error!(
-            message = %error_message,
-            event = "app_error",
-            status_code = %self.0,
-            error = %self.1,
-            error_debug = %error_debug,
-            error_type = "application_error"
-        );
+        // Use info level for token expiration (401), error level for others
+        if self.0 == StatusCode::UNAUTHORIZED {
+            info!(
+                message = %error_message,
+                event = "app_error",
+                status_code = %self.0,
+                error = %self.1,
+                error_debug = %error_debug,
+                error_type = "application_error"
+            );
+        } else {
+            error!(
+                message = %error_message,
+                event = "app_error",
+                status_code = %self.0,
+                error = %self.1,
+                error_debug = %error_debug,
+                error_type = "application_error"
+            );
+        }
         (self.0, format!("Something went wrong: {}", self.1)).into_response()
     }
 }
