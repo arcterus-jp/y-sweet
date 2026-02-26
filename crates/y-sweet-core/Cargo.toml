@@ -32,6 +32,7 @@ serde_json = "1.0.103"
 sha2 = "0.10.7"
 thiserror = "1.0.44"
 time = { version = "0.3.25", features = ["wasm-bindgen"] }
+tokio = { version = "1.29.1", features = ["sync"] }  # Required for broadcast channels
 tracing = "0.1.37"
 yrs = { version = "0.19.1" }
 yrs-kvstore = "0.3.0"

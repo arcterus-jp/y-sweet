@@ -1,17 +1,10 @@
 use crate::api_types::Authorization;
-use crate::sync::{
-    self, awareness::Awareness, DefaultProtocol, Message, Protocol, SyncMessage, MSG_SYNC,
-    MSG_SYNC_UPDATE,
-};
+use crate::sync::{self, awareness::Awareness, DefaultProtocol, Message, Protocol, SyncMessage};
 use std::sync::{Arc, OnceLock, RwLock};
 use yrs::{
     block::ClientID,
-    encoding::write::Write,
-    updates::{
-        decoder::Decode,
-        encoder::{Encode, Encoder, EncoderV1},
-    },
-    ReadTxn, Subscription, Transact, Update,
+    updates::{decoder::Decode, encoder::Encode},
+    ReadTxn, Transact, Update,
 };
 
 // TODO: this is an implementation detail and should not be exposed.
@@ -25,15 +18,15 @@ type Callback = Arc<dyn Fn(&[u8]) + 'static + Send + Sync>;
 
 const SYNC_STATUS_MESSAGE: u8 = 102;
 
+/// A connection to a Yjs document over the y-sync protocol.
+///
+/// Fan-out of document and awareness updates is handled via `tokio::sync::broadcast`
+/// channels in `DocWithSyncKv`, not via per-connection observers. This reduces write-lock
+/// hold time from O(N) to O(1) when N clients are connected to the same document.
 pub struct DocConnection {
     awareness: Arc<RwLock<Awareness>>,
-    #[allow(unused)] // acts as RAII guard
-    doc_subscription: Subscription,
-    #[allow(unused)] // acts as RAII guard
-    awareness_subscription: Subscription,
     authorization: Authorization,
     callback: Callback,
-    closed: Arc<OnceLock<()>>,
 
     /// If the client sends an awareness state, this will be set to its client ID.
     /// It is used to clear the awareness state when a client disconnects.
@@ -70,81 +63,31 @@ impl DocConnection {
         authorization: Authorization,
         callback: Callback,
     ) -> Self {
-        let closed = Arc::new(OnceLock::new());
+        // Use a read lock for the initial handshake — no observer registration needed here.
+        // Document and awareness update fan-out is handled via broadcast channels in
+        // DocWithSyncKv, so no per-connection observers are registered.
+        {
+            let awareness = awareness.read().unwrap();
 
-        let (doc_subscription, awareness_subscription) = {
-            let mut awareness = awareness.write().unwrap();
-
-            // Initial handshake is based on this:
+            // Initial handshake based on:
             // https://github.com/y-crdt/y-sync/blob/56958e83acfd1f3c09f5dd67cf23c9c72f000707/src/sync.rs#L45-L54
 
-            {
-                // Send a server-side state vector, so that the client can send
-                // updates that happened offline.
-                let sv = awareness.doc().transact().state_vector();
-                let sync_step_1 = Message::Sync(SyncMessage::SyncStep1(sv)).encode_v1();
-                callback(&sync_step_1);
-            }
+            // Send server-side state vector so the client can send offline updates.
+            let sv = awareness.doc().transact().state_vector();
+            let sync_step_1 = Message::Sync(SyncMessage::SyncStep1(sv)).encode_v1();
+            callback(&sync_step_1);
 
-            {
-                // Send the initial awareness state.
-                let update = awareness.update().unwrap();
-                let awareness = Message::Awareness(update).encode_v1();
-                callback(&awareness);
-            }
-
-            let doc_subscription = {
-                let doc = awareness.doc();
-                let callback = callback.clone();
-                let closed = closed.clone();
-                doc.observe_update_v1(move |_, event| {
-                    if closed.get().is_some() {
-                        return;
-                    }
-                    // https://github.com/y-crdt/y-sync/blob/56958e83acfd1f3c09f5dd67cf23c9c72f000707/src/net/broadcast.rs#L47-L52
-                    let mut encoder = EncoderV1::new();
-                    encoder.write_var(MSG_SYNC);
-                    encoder.write_var(MSG_SYNC_UPDATE);
-                    encoder.write_buf(&event.update);
-                    let msg = encoder.to_vec();
-                    callback(&msg);
-                })
-                .unwrap()
-            };
-
-            let callback = callback.clone();
-            let closed = closed.clone();
-            let awareness_subscription = awareness.on_update(move |awareness, e| {
-                if closed.get().is_some() {
-                    return;
-                }
-
-                // https://github.com/y-crdt/y-sync/blob/56958e83acfd1f3c09f5dd67cf23c9c72f000707/src/net/broadcast.rs#L59
-                let added = e.added();
-                let updated = e.updated();
-                let removed = e.removed();
-                let mut changed = Vec::with_capacity(added.len() + updated.len() + removed.len());
-                changed.extend_from_slice(added);
-                changed.extend_from_slice(updated);
-                changed.extend_from_slice(removed);
-
-                if let Ok(u) = awareness.update_with_clients(changed) {
-                    let msg = Message::Awareness(u).encode_v1();
-                    callback(&msg);
-                }
-            });
-
-            (doc_subscription, awareness_subscription)
-        };
+            // Send initial awareness state.
+            let update = awareness.update().unwrap();
+            let awareness_msg = Message::Awareness(update).encode_v1();
+            callback(&awareness_msg);
+        }
 
         Self {
             awareness,
-            doc_subscription,
-            awareness_subscription,
             authorization,
             callback,
             client_id: OnceLock::new(),
-            closed,
         }
     }
 
@@ -155,6 +98,67 @@ impl DocConnection {
         if let Some(result) = result {
             let msg = result.encode_v1();
             (self.callback)(&msg);
+        }
+
+        Ok(())
+    }
+
+    /// Process a batch of incoming messages, applying all CRDT updates in a single
+    /// write-lock acquisition to minimize lock contention under burst load.
+    ///
+    /// All `SyncMessage::Update` messages are collected and applied within one
+    /// `transact_mut()` call, causing the doc observer to fire only once per batch.
+    /// Non-Update messages (SyncStep1, Auth, Awareness, etc.) are processed individually
+    /// after the batched updates. Responses are sent via the connection callback.
+    pub async fn send_batch(&self, updates: &[Vec<u8>]) -> Result<(), anyhow::Error> {
+        if updates.is_empty() {
+            return Ok(());
+        }
+
+        if updates.len() == 1 {
+            return self.send(&updates[0]).await;
+        }
+
+        let can_write = matches!(self.authorization, Authorization::Full);
+
+        // Separate CRDT update messages from other message types.
+        let mut other_indices: Vec<usize> = Vec::new();
+        let mut has_crdt_updates = false;
+
+        for (i, raw) in updates.iter().enumerate() {
+            match Message::decode_v1(raw)? {
+                Message::Sync(SyncMessage::Update(_)) if can_write => {
+                    has_crdt_updates = true;
+                }
+                _ => {
+                    other_indices.push(i);
+                }
+            }
+        }
+
+        // Apply all CRDT updates in a single transaction to trigger the observer once.
+        // When the transaction is committed (dropped), the single broadcast observer fires
+        // exactly once, regardless of how many updates were batched.
+        if has_crdt_updates {
+            let awareness = self.awareness.write().unwrap();
+            let mut txn = awareness.doc().transact_mut();
+            for raw in updates {
+                if let Ok(Message::Sync(SyncMessage::Update(u))) = Message::decode_v1(raw) {
+                    if let Ok(update) = Update::decode_v1(&u) {
+                        txn.apply_update(update);
+                    }
+                }
+            }
+            // Transaction commits (and observer fires once) when txn is dropped here.
+        }
+
+        // Process all non-Update messages individually.
+        for &i in &other_indices {
+            let msg = Message::decode_v1(&updates[i])?;
+            if let Some(result) = self.handle_msg(&DefaultProtocol, msg)? {
+                let msg = result.encode_v1();
+                (self.callback)(&msg);
+            }
         }
 
         Ok(())
@@ -228,8 +232,6 @@ impl DocConnection {
 
 impl Drop for DocConnection {
     fn drop(&mut self) {
-        self.closed.set(()).unwrap();
-
         // If this client had an awareness state, remove it.
         if let Some(client_id) = self.client_id.get() {
             let mut awareness = self.awareness.write().unwrap();
