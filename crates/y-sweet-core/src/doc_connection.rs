@@ -79,18 +79,23 @@ impl DocConnection {
             // https://github.com/y-crdt/y-sync/blob/56958e83acfd1f3c09f5dd67cf23c9c72f000707/src/sync.rs#L45-L54
 
             {
-                // Send a server-side state vector, so that the client can send
-                // updates that happened offline.
-                let sv = awareness.doc().transact().state_vector();
-                let sync_step_1 = Message::Sync(SyncMessage::SyncStep1(sv)).encode_v1();
-                callback(&sync_step_1);
-            }
+                let span = tracing::info_span!("ws.initial_sync");
+                let _guard = span.enter();
 
-            {
-                // Send the initial awareness state.
-                let update = awareness.update().unwrap();
-                let awareness = Message::Awareness(update).encode_v1();
-                callback(&awareness);
+                {
+                    // Send a server-side state vector, so that the client can send
+                    // updates that happened offline.
+                    let sv = awareness.doc().transact().state_vector();
+                    let sync_step_1 = Message::Sync(SyncMessage::SyncStep1(sv)).encode_v1();
+                    callback(&sync_step_1);
+                }
+
+                {
+                    // Send the initial awareness state.
+                    let update = awareness.update().unwrap();
+                    let awareness = Message::Awareness(update).encode_v1();
+                    callback(&awareness);
+                }
             }
 
             let doc_subscription = {
@@ -149,7 +154,28 @@ impl DocConnection {
     }
 
     pub async fn send(&self, update: &[u8]) -> Result<(), anyhow::Error> {
+        let span = tracing::info_span!(
+            "ws.message.process",
+            message_type = tracing::field::Empty,
+            payload_size = update.len(),
+        );
+        let _guard = span.enter();
+
         let msg = Message::decode_v1(update)?;
+
+        span.record(
+            "message_type",
+            match &msg {
+                Message::Sync(SyncMessage::SyncStep1(_)) => "sync_step1",
+                Message::Sync(SyncMessage::SyncStep2(_)) => "sync_step2",
+                Message::Sync(SyncMessage::Update(_)) => "sync_update",
+                Message::Auth(_) => "auth",
+                Message::AwarenessQuery => "awareness_query",
+                Message::Awareness(_) => "awareness",
+                Message::Custom(_, _) => "custom",
+            },
+        );
+
         let result = self.handle_msg(&DefaultProtocol, msg)?;
 
         if let Some(result) = result {
