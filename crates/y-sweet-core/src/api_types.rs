@@ -40,7 +40,7 @@ impl Default for AuthDocRequest {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct ClientToken {
     /// The URL compatible with the y-websocket provider. The provider will append
     /// a document ID to this string and establish a WebSocket connection.
@@ -63,80 +63,11 @@ pub struct ClientToken {
     pub authorization: Authorization,
 }
 
-#[derive(Deserialize)]
-pub struct ContentUploadRequest {
-    /// The content type of the file to upload
-    #[serde(rename = "contentType")]
-    pub content_type: String,
-}
-
-#[derive(Serialize)]
-pub struct ContentUploadResponse {
-    /// The signed URL for uploading the content
-    #[serde(rename = "uploadUrl")]
-    pub upload_url: String,
-
-    /// The asset ID that will be used to store the content
-    #[serde(rename = "assetId")]
-    pub asset_id: String,
-}
-
-#[derive(Serialize)]
-pub struct AssetUrl {
-    /// The asset ID (without extension) of the asset
-    #[serde(rename = "assetId")]
-    pub asset_id: String,
-
-    /// The signed URL for downloading the asset
-    #[serde(rename = "downloadUrl")]
-    pub download_url: String,
-}
-
-#[derive(Serialize)]
-pub struct AssetsResponse {
-    /// List of asset URLs with signed download URLs
-    pub assets: Vec<AssetUrl>,
-}
-
 #[derive(Deserialize, Debug)]
 pub struct DocCreationRequest {
     /// The ID of the document to create. If not provided, a random ID will be generated.
     #[serde(skip_serializing_if = "Option::is_none", rename = "docId")]
     pub doc_id: Option<String>,
-}
-
-#[derive(Deserialize)]
-pub struct DocCopyRequest {
-    /// The ID of the destination document where the source document will be copied to
-    #[serde(rename = "destinationDocId")]
-    pub destination_doc_id: String,
-}
-
-#[derive(Serialize)]
-pub struct DocCopyResponse {
-    /// The ID of the source document that was copied
-    #[serde(rename = "sourceDocId")]
-    pub source_doc_id: String,
-    /// The ID of the destination document where the copy was created
-    #[serde(rename = "destinationDocId")]
-    pub destination_doc_id: String,
-    /// Whether the copy operation was successful
-    pub success: bool,
-}
-
-#[derive(Serialize)]
-pub struct DocDeleteResponse {
-    /// The document that was deleted.
-    #[serde(rename = "docId")]
-    pub doc_id: String,
-    /// Whether the stored snapshot (data.ysweet) was removed.
-    #[serde(rename = "dataDeleted")]
-    pub data_deleted: bool,
-    /// Number of asset objects removed from storage.
-    #[serde(rename = "deletedAssets")]
-    pub deleted_assets: usize,
-    /// Indicates that the delete operation completed without errors.
-    pub success: bool,
 }
 
 /// Validate that the document name contains only alphanumeric characters, dashes, and underscores.

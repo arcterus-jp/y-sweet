@@ -1,4 +1,5 @@
 pub mod s3;
+pub mod store_ext;
 
 use async_trait::async_trait;
 use thiserror::Error;
@@ -25,10 +26,15 @@ pub trait Store: 'static {
     async fn set(&self, key: &str, value: Vec<u8>) -> Result<()>;
     async fn remove(&self, key: &str) -> Result<()>;
     async fn exists(&self, key: &str) -> Result<bool>;
+
+    // === Extensions (start) ===
+    // These methods are custom extensions for presigned URLs and advanced operations.
+    // When merging from upstream, these should be preserved as they don't conflict with base Store functionality.
     async fn generate_upload_presigned_url(&self, key: &str, content_type: &str) -> Result<String>;
     async fn generate_download_presigned_url(&self, key: &str) -> Result<String>;
     async fn list_objects(&self, prefix: &str) -> Result<Vec<String>>;
     async fn copy_document(&self, source_doc_id: &str, destination_doc_id: &str) -> Result<()>;
+    // === Extensions (end) ===
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -39,8 +45,13 @@ pub trait Store: Send + Sync {
     async fn set(&self, key: &str, value: Vec<u8>) -> Result<()>;
     async fn remove(&self, key: &str) -> Result<()>;
     async fn exists(&self, key: &str) -> Result<bool>;
+
+    // === Extensions (start) ===
+    // These methods are custom extensions for presigned URLs and advanced operations.
+    // When merging from upstream, these should be preserved as they don't conflict with base Store functionality.
     async fn generate_upload_presigned_url(&self, key: &str, content_type: &str) -> Result<String>;
     async fn generate_download_presigned_url(&self, key: &str) -> Result<String>;
     async fn list_objects(&self, prefix: &str) -> Result<Vec<String>>;
     async fn copy_document(&self, source_doc_id: &str, destination_doc_id: &str) -> Result<()>;
+    // === Extensions (end) ===
 }

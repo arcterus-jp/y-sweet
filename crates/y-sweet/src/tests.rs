@@ -1,4 +1,4 @@
-use crate::server::{get_extension_from_content_type, is_allowed_content_type};
+use crate::server_ext::{get_extension_from_content_type, is_allowed_content_type};
 
 #[test]
 fn test_debug_extensions() {

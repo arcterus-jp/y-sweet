@@ -3,18 +3,19 @@ use axum::{
     body::Bytes,
     extract::{
         ws::{Message, WebSocket},
-        DefaultBodyLimit, Path, Query, Request, State, WebSocketUpgrade,
+        Path, Query, Request, State, WebSocketUpgrade,
     },
     http::{
-        header::{HeaderMap, HeaderName},
+        header::{HeaderMap, HeaderName, HeaderValue},
         StatusCode,
     },
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{delete, get, post},
     Json, Router,
 };
 use axum_extra::typed_header::TypedHeader;
+use cuid::cuid2;
 use dashmap::{mapref::one::MappedRef, DashMap};
 use ddtrace::axum::OtelAxumLayer;
 use futures::{SinkExt, StreamExt};
@@ -34,24 +35,22 @@ use tracing::{error, info, span, warn, Level};
 use url::Url;
 use y_sweet_core::{
     api_types::{
-        validate_doc_name, AuthDocRequest, Authorization, ClientToken, DocCreationRequest,
-        NewDocResponse,
+        validate_doc_name, AuthDocRequest, Authorization, ClientToken,
+        DocCreationRequest, NewDocResponse,
+    },
+    api_types_ext::{
+        AssetUrl, AssetsResponse, ContentUploadRequest, ContentUploadResponse,
+        DocCopyRequest, DocCopyResponse, DocDeleteResponse,
     },
     auth::{Authenticator, ExpirationTimeEpochMillis, DEFAULT_EXPIRATION_SECONDS},
     doc_connection::DocConnection,
     doc_sync::DocWithSyncKv,
-    store::Store,
+    store::{Store, StoreError, store_ext::StoreExt},
     sync::awareness::Awareness,
     sync_kv::SyncKv,
 };
 
 const PLANE_VERIFIED_USER_DATA_HEADER: &str = "x-verified-user-data";
-
-// Every 20 seconds, we send a ping to the client.
-const PING_EVERY: Duration = Duration::from_secs(20);
-// If we haven't received a pong in the last 40 seconds, we close the connection.
-// All modern browsers will respond to websocket pings with a pong message.
-const PONG_TIMEOUT: Duration = Duration::from_secs(40);
 
 fn current_time_epoch_millis() -> u64 {
     let now = std::time::SystemTime::now();
@@ -60,7 +59,7 @@ fn current_time_epoch_millis() -> u64 {
 }
 
 #[derive(Debug)]
-pub struct AppError(pub StatusCode, pub anyhow::Error);
+pub struct AppError(StatusCode, anyhow::Error);
 impl std::error::Error for AppError {}
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
@@ -68,26 +67,14 @@ impl IntoResponse for AppError {
         let error_message = format!("{}", self.1);
         let error_debug = format!("{:?}", self.1);
 
-        // Use info level for token expiration (401), error level for others
-        if self.0 == StatusCode::UNAUTHORIZED {
-            info!(
-                message = %error_message,
-                event = "app_error",
-                status_code = %self.0,
-                error = %self.1,
-                error_debug = %error_debug,
-                error_type = "application_error"
-            );
-        } else {
-            error!(
-                message = %error_message,
-                event = "app_error",
-                status_code = %self.0,
-                error = %self.1,
-                error_debug = %error_debug,
-                error_type = "application_error"
-            );
-        }
+        error!(
+            message = %error_message,
+            event = "app_error",
+            status_code = %self.0,
+            error = %self.1,
+            error_debug = %error_debug,
+            error_type = "application_error"
+        );
         (self.0, format!("Something went wrong: {}", self.1)).into_response()
     }
 }
@@ -117,9 +104,6 @@ pub struct Server {
     /// Whether to garbage collect docs that are no longer in use.
     /// Disabled for single-doc mode, since we only have one doc.
     doc_gc: bool,
-    max_body_size: Option<usize>,
-    /// Whether to skip garbage collection in Yrs documents.
-    skip_gc: bool,
 }
 
 impl Server {
@@ -130,8 +114,6 @@ impl Server {
         url_prefix: Option<Url>,
         cancellation_token: CancellationToken,
         doc_gc: bool,
-        max_body_size: Option<usize>,
-        skip_gc: bool,
     ) -> Result<Self> {
         Ok(Self {
             docs: Arc::new(DashMap::new()),
@@ -142,8 +124,6 @@ impl Server {
             url_prefix,
             cancellation_token,
             doc_gc,
-            max_body_size,
-            skip_gc,
         })
     }
 
@@ -180,14 +160,9 @@ impl Server {
     pub async fn load_doc(&self, doc_id: &str) -> Result<()> {
         let (send, recv) = channel(1024);
 
-        let dwskv = DocWithSyncKv::new(
-            doc_id,
-            self.store.clone(),
-            move || {
-                send.try_send(()).unwrap();
-            },
-            self.skip_gc,
-        )
+        let dwskv = DocWithSyncKv::new(doc_id, self.store.clone(), move || {
+            send.try_send(()).unwrap();
+        })
         .await?;
 
         dwskv
@@ -561,8 +536,8 @@ impl Server {
             .layer(OtelAxumLayer::default())
             .with_state(self.clone());
 
-        // Merge extension routes
-        base_routes.merge(crate::server_ext::ext_routes(self))
+        // Merge GNUS extension routes
+        base_routes.merge(crate::server_ext::gnus_routes(self))
     }
 
     pub fn single_doc_routes(self: &Arc<Self>) -> Router {
@@ -574,8 +549,8 @@ impl Server {
             .layer(OtelAxumLayer::default())
             .with_state(self.clone());
 
-        // Merge extension routes
-        base_routes.merge(crate::server_ext::ext_single_doc_routes(self))
+        // Merge GNUS extension routes
+        base_routes.merge(crate::server_ext::gnus_single_doc_routes(self))
     }
 
     async fn serve_internal(
@@ -586,16 +561,10 @@ impl Server {
     ) -> Result<()> {
         let token = self.cancellation_token.clone();
 
-        let mut app = if let Some(max_body_size) = self.max_body_size {
-            routes.layer(DefaultBodyLimit::max(max_body_size))
-        } else {
+        let app = if redact_errors {
             routes
-        };
-
-        app = if redact_errors {
-            app
         } else {
-            app.layer(middleware::from_fn(Self::redact_error_middleware))
+            routes.layer(middleware::from_fn(Self::redact_error_middleware))
         };
 
         axum::serve(listener, app.into_make_service())
@@ -620,11 +589,7 @@ impl Server {
         s.serve_internal(listener, redact_errors, routes).await
     }
 
-    pub fn verify_doc_token(
-        &self,
-        token: Option<&str>,
-        doc: &str,
-    ) -> Result<Authorization, AppError> {
+    pub fn verify_doc_token(&self, token: Option<&str>, doc: &str) -> Result<Authorization, AppError> {
         if let Some(authenticator) = &self.authenticator {
             if let Some(token) = token {
                 let authorization = authenticator
@@ -843,45 +808,16 @@ async fn handle_socket(
         }
     );
 
-    let last_pong = Arc::new(RwLock::new(tokio::time::Instant::now()));
-    let last_pong_clone = last_pong.clone();
-
     tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(PING_EVERY);
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-
-        loop {
-            tokio::select! {
-                msg = recv.recv() => {
-                    let Some(msg) = msg else {
-                        break;
-                    };
-                    if let Err(e) = sink.send(Message::Binary(msg)).await {
-                        let error_message = format!("WebSocket send error: {}", e);
-                        let error_str = e.to_string();
-                        if error_str.contains("Sending after closing") {
-                            warn!(
-                                message = %error_message,
-                                event = "websocket_send_after_close",
-                                error = %e
-                            );
-                        } else {
-                            error!(
-                                message = %error_message,
-                                event = "websocket_send_error",
-                                error = %e
-                            );
-                        }
-                        break;
-                    }
-                }
-                _ = ticker.tick() => {
-                    if last_pong_clone.read().expect("Failed to get read lock on last_pong").elapsed() > PONG_TIMEOUT {
-                        tracing::info!("Pong timeout, closing connection");
-                        break;
-                    }
-                    let _ = sink.send(Message::Ping(vec![])).await;
-                }
+        while let Some(msg) = recv.recv().await {
+            if let Err(e) = sink.send(Message::Binary(msg)).await {
+                let error_message = format!("WebSocket send error: {}", e);
+                error!(
+                    message = %error_message,
+                    event = "websocket_send_error",
+                    error = %e
+                );
+                break;
             }
         }
     });
@@ -900,10 +836,7 @@ async fn handle_socket(
     let mut message_count = 0u64;
     loop {
         tokio::select! {
-            msg = stream.next() => {
-                let Some(msg) = msg else {
-                    break;
-                };
+            Some(msg) = stream.next() => {
                 let msg = match msg {
                     Ok(Message::Binary(bytes)) => {
                         message_count += 1;
@@ -917,10 +850,6 @@ async fn handle_socket(
                             reason = "client_close"
                         );
                         break;
-                    }
-                    Ok(Message::Pong(_)) => {
-                        *last_pong.write().expect("Failed to get write lock on last_pong") = tokio::time::Instant::now();
-                        continue;
                     }
                     Err(e) => {
                         // The stream will complain about things like
@@ -965,11 +894,6 @@ async fn handle_socket(
             }
         }
     }
-
-    // Close状態でのメッセージ送信を防ぐため、即座にDocConnectionをdropする
-    // これによりclosedフラグがセットされ、サブスクリプションコールバックが
-    // 新しいメッセージをキューするのを止める
-    drop(connection);
 }
 
 async fn check_store(
@@ -1135,15 +1059,463 @@ pub fn get_authorization_from_plane_header(headers: HeaderMap) -> Result<Authori
     }
 }
 
+pub fn is_allowed_content_type(content_type: &str) -> bool {
+    let mime = match content_type.parse::<mime::Mime>() {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+
+    // Check if it's an image or video
+    let type_str = mime.type_().as_str();
+    type_str == "image" || type_str == "video"
+}
+
+pub fn get_extension_from_content_type(content_type: &str) -> String {
+    let mime = content_type
+        .parse::<mime::Mime>()
+        .unwrap_or(mime::APPLICATION_OCTET_STREAM);
+    let extension = mime_guess::get_mime_extensions(&mime)
+        .and_then(|exts| exts.first())
+        .unwrap_or(&"bin");
+    format!(".{}", extension)
+}
+
+fn extract_asset_id_from_filename(filename: &str) -> Option<String> {
+    // Find the last dot to separate asset_id and extension
+    if let Some(last_dot_pos) = filename.rfind('.') {
+        if last_dot_pos > 0 {
+            return Some(filename[..last_dot_pos].to_string());
+        }
+    }
+    // If no extension found, return the filename as is
+    Some(filename.to_string())
+}
+
+async fn generate_upload_presigned_url(
+    Path(doc_id): Path<String>,
+    State(server_state): State<Arc<Server>>,
+    auth_header: Option<TypedHeader<headers::Authorization<headers::authorization::Bearer>>>,
+    Json(body): Json<ContentUploadRequest>,
+) -> Result<Json<ContentUploadResponse>, AppError> {
+    let token = get_token_from_header(auth_header);
+    let _ = server_state.verify_doc_token(token.as_deref(), &doc_id)?;
+
+    // Check if document exists
+    if !server_state.doc_exists(&doc_id).await {
+        Err((StatusCode::NOT_FOUND, anyhow!("Doc {} not found", doc_id)))?;
+    }
+
+    // Validate content type - only allow images and videos
+    if !is_allowed_content_type(&body.content_type) {
+        Err((
+            StatusCode::BAD_REQUEST,
+            anyhow!(
+                "Content type '{}' is not allowed. Only image and video files are supported.",
+                body.content_type
+            ),
+        ))?;
+    }
+
+    // Generate asset ID with cuid and extension
+    let asset_id = cuid2();
+    let extension = get_extension_from_content_type(&body.content_type);
+    let asset_name = format!("{}{}", asset_id, extension);
+
+    // Create the key path: {doc_id}/assets/{asset_name}
+    let key = format!("{}/assets/{}", doc_id, asset_name);
+
+    let upload_url = if let Some(store) = &server_state.store {
+        store
+            .generate_upload_presigned_url(&key, &body.content_type)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    anyhow!("Failed to generate upload URL: {:?}", e),
+                )
+            })?
+    } else {
+        // For local development without store, return a dummy URL
+        format!("file://localhost/{}", key)
+    };
+
+    Ok(Json(ContentUploadResponse {
+        upload_url,
+        asset_id: asset_name,
+    }))
+}
+
+async fn generate_upload_presigned_url_single(
+    State(server_state): State<Arc<Server>>,
+    headers: HeaderMap,
+    Json(body): Json<ContentUploadRequest>,
+) -> Result<Json<ContentUploadResponse>, AppError> {
+    let doc_id = server_state.get_single_doc_id()?;
+
+    // the doc server is meant to be run in Plane, so we expect verified plane
+    // headers to be used for authorization.
+    let _ = get_authorization_from_plane_header(headers)?;
+
+    // Validate content type - only allow images and videos
+    if !is_allowed_content_type(&body.content_type) {
+        Err((
+            StatusCode::BAD_REQUEST,
+            anyhow!(
+                "Content type '{}' is not allowed. Only image and video files are supported.",
+                body.content_type
+            ),
+        ))?;
+    }
+
+    // Generate asset ID with cuid and extension
+    let asset_id = cuid2();
+    let extension = get_extension_from_content_type(&body.content_type);
+    let asset_name = format!("{}{}", asset_id, extension);
+
+    // Create the key path: {doc_id}/assets/{asset_name}
+    let key = format!("{}/assets/{}", doc_id, asset_name);
+
+    let upload_url = if let Some(store) = &server_state.store {
+        store
+            .generate_upload_presigned_url(&key, &body.content_type)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    anyhow!("Failed to generate upload URL: {:?}", e),
+                )
+            })?
+    } else {
+        // For local development without store, return a dummy URL
+        format!("file://localhost/{}", key)
+    };
+
+    Ok(Json(ContentUploadResponse {
+        upload_url,
+        asset_id: asset_name,
+    }))
+}
+
+async fn get_doc_assets(
+    Path(doc_id): Path<String>,
+    State(server_state): State<Arc<Server>>,
+    auth_header: Option<TypedHeader<headers::Authorization<headers::authorization::Bearer>>>,
+) -> Result<impl IntoResponse, AppError> {
+    let token = get_token_from_header(auth_header);
+    let _ = server_state.verify_doc_token(token.as_deref(), &doc_id)?;
+
+    // Check if document exists
+    if !server_state.doc_exists(&doc_id).await {
+        Err((StatusCode::NOT_FOUND, anyhow!("Doc {} not found", doc_id)))?;
+    }
+
+    let assets = if let Some(store) = &server_state.store {
+        // List assets in the assets directory
+        let assets_prefix = format!("{}/assets/", doc_id);
+        let asset_names = store.list_objects(&assets_prefix).await.map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                anyhow!("Failed to list assets: {:?}", e),
+            )
+        })?;
+
+        // Generate signed URLs for each asset
+        let mut asset_urls = Vec::new();
+        for filename in asset_names {
+            // Extract asset_id from filename (remove extension)
+            if let Some(asset_id) = extract_asset_id_from_filename(&filename) {
+                let key = format!("{}/assets/{}", doc_id, filename);
+                let download_url =
+                    store
+                        .generate_download_presigned_url(&key)
+                        .await
+                        .map_err(|e| {
+                            (
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                anyhow!(
+                                    "Failed to generate download URL for {}: {:?}",
+                                    filename,
+                                    e
+                                ),
+                            )
+                        })?;
+
+                asset_urls.push(AssetUrl {
+                    asset_id,
+                    download_url,
+                });
+            }
+        }
+
+        asset_urls
+    } else {
+        // For local development without store, return empty list
+        Vec::new()
+    };
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("private, max-age=30"),
+    );
+    Ok((headers, Json(AssetsResponse { assets })))
+}
+
+async fn get_doc_assets_single(
+    State(server_state): State<Arc<Server>>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, AppError> {
+    let doc_id = server_state.get_single_doc_id()?;
+    let _authorization = get_authorization_from_plane_header(headers)?;
+
+    if let Some(store) = &server_state.store {
+        let mut assets = Vec::new();
+
+        // List all objects in the document's assets directory
+        let assets_prefix = format!("{}/assets/", doc_id);
+        let objects = store.list_objects(&assets_prefix).await.map_err(|e| {
+            AppError(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                anyhow!("Failed to list assets: {}", e),
+            )
+        })?;
+
+        for object_key in objects {
+            // Extract asset ID from the object key
+            if let Some(asset_id) = extract_asset_id_from_filename(&object_key) {
+                let download_url = store
+                    .generate_download_presigned_url(&object_key)
+                    .await
+                    .map_err(|e| {
+                        AppError(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            anyhow!("Failed to generate download URL: {}", e),
+                        )
+                    })?;
+
+                assets.push(AssetUrl {
+                    asset_id,
+                    download_url,
+                });
+            }
+        }
+
+        let mut resp_headers = HeaderMap::new();
+        resp_headers.insert(
+            axum::http::header::CACHE_CONTROL,
+            HeaderValue::from_static("private, max-age=30"),
+        );
+        Ok((resp_headers, Json(AssetsResponse { assets })))
+    } else {
+        Err(AppError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            anyhow!("No store configured"),
+        ))
+    }
+}
+
+async fn delete_document(
+    Path(doc_id): Path<String>,
+    State(server_state): State<Arc<Server>>,
+    auth_header: Option<TypedHeader<headers::Authorization<headers::authorization::Bearer>>>,
+) -> Result<Json<DocDeleteResponse>, AppError> {
+    // Check authentication - this is an admin-only API
+    server_state.check_auth(auth_header)?;
+
+    if !validate_doc_name(&doc_id) {
+        return Err(AppError(
+            StatusCode::BAD_REQUEST,
+            anyhow!("Invalid document ID"),
+        ));
+    }
+
+    if !server_state.doc_exists(&doc_id).await {
+        return Err(AppError(
+            StatusCode::NOT_FOUND,
+            anyhow!("Document not found"),
+        ));
+    }
+
+    info!(
+        message = "Deleting document",
+        event = "document_delete_started",
+        doc_id = %doc_id
+    );
+
+    let mut existed_in_memory = false;
+    if let Some((_, doc)) = server_state.docs.remove(&doc_id) {
+        existed_in_memory = true;
+        // Shut down persistence to avoid resurrecting the document
+        doc.sync_kv().shutdown();
+    }
+
+    let mut data_deleted = false;
+    let mut deleted_assets = 0usize;
+
+    if let Some(store) = &server_state.store {
+        let data_key = format!("{}/data.ysweet", doc_id);
+        match store.remove(&data_key).await {
+            Ok(_) => {
+                data_deleted = true;
+            }
+            Err(StoreError::DoesNotExist(_)) => {}
+            Err(e) => {
+                error!(
+                    message = "Failed to delete document data",
+                    event = "document_delete_failed",
+                    doc_id = %doc_id,
+                    error = %e
+                );
+                return Err(AppError(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    anyhow!("Failed to delete document data: {}", e),
+                ));
+            }
+        }
+
+        let assets_prefix = format!("{}/assets/", doc_id);
+        match store.list_objects(&assets_prefix).await {
+            Ok(asset_names) => {
+                for filename in asset_names {
+                    let key = format!("{}/assets/{}", doc_id, filename);
+                    match store.remove(&key).await {
+                        Ok(_) => {
+                            deleted_assets += 1;
+                        }
+                        Err(StoreError::DoesNotExist(_)) => {}
+                        Err(e) => {
+                            error!(
+                                message = "Failed to delete document asset",
+                                event = "document_delete_asset_failed",
+                                doc_id = %doc_id,
+                                asset = %filename,
+                                error = %e
+                            );
+                            return Err(AppError(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                anyhow!("Failed to delete asset {}: {}", filename, e),
+                            ));
+                        }
+                    }
+                }
+            }
+            Err(StoreError::DoesNotExist(_)) => {}
+            Err(e) => {
+                error!(
+                    message = "Failed to list document assets",
+                    event = "document_delete_failed",
+                    doc_id = %doc_id,
+                    error = %e
+                );
+                return Err(AppError(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    anyhow!("Failed to list assets for deletion: {}", e),
+                ));
+            }
+        }
+    }
+
+    let success = existed_in_memory || data_deleted || deleted_assets > 0;
+
+    info!(
+        message = "Document deleted",
+        event = "document_delete_completed",
+        doc_id = %doc_id,
+        data_deleted = data_deleted,
+        deleted_assets = deleted_assets,
+        existed_in_memory = existed_in_memory
+    );
+
+    Ok(Json(DocDeleteResponse {
+        doc_id,
+        success,
+        data_deleted,
+        deleted_assets,
+    }))
+}
+
+async fn copy_document(
+    Path(source_doc_id): Path<String>,
+    State(server_state): State<Arc<Server>>,
+    auth_header: Option<TypedHeader<headers::Authorization<headers::authorization::Bearer>>>,
+    Json(body): Json<DocCopyRequest>,
+) -> Result<Json<DocCopyResponse>, AppError> {
+    // Check authentication - this is an admin-only API
+    server_state.check_auth(auth_header)?;
+
+    let destination_doc_id = body.destination_doc_id;
+
+    // Validate document IDs
+    if !validate_doc_name(&source_doc_id) {
+        return Err(AppError(
+            StatusCode::BAD_REQUEST,
+            anyhow!("Invalid source document ID"),
+        ));
+    }
+
+    if !validate_doc_name(&destination_doc_id) {
+        return Err(AppError(
+            StatusCode::BAD_REQUEST,
+            anyhow!("Invalid destination document ID"),
+        ));
+    }
+
+    // Check if source document exists
+    if !server_state.doc_exists(&source_doc_id).await {
+        return Err(AppError(
+            StatusCode::NOT_FOUND,
+            anyhow!("Source document not found"),
+        ));
+    }
+
+    // Force sync from memory to S3 before copying to ensure we have the latest data
+    if let Some(doc) = server_state.docs.get(&source_doc_id) {
+        tracing::debug!(
+            "Forcing sync of source document {} before copy",
+            source_doc_id
+        );
+        if let Err(e) = doc.sync_kv().persist().await {
+            tracing::warn!(
+                "Failed to force sync of source document {}: {}",
+                source_doc_id,
+                e
+            );
+            // Continue with copy operation even if sync fails
+        }
+    }
+
+    // Perform the copy operation (will overwrite if destination exists)
+    if let Some(store) = &server_state.store {
+        store
+            .copy_document(&source_doc_id, &destination_doc_id)
+            .await
+            .map_err(|e| {
+                AppError(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    anyhow!("Failed to copy document: {}", e),
+                )
+            })?;
+
+        Ok(Json(DocCopyResponse {
+            source_doc_id,
+            destination_doc_id,
+            success: true,
+        }))
+    } else {
+        Err(AppError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            anyhow!("No store configured"),
+        ))
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::server_ext::{copy_document, delete_document, get_extension_from_content_type};
     use async_trait::async_trait;
     use dashmap::DashMap;
     use std::sync::Arc;
     use y_sweet_core::api_types::Authorization;
-    use y_sweet_core::api_types_ext::DocCopyRequest;
     use y_sweet_core::store::{Result, Store};
     use yrs_kvstore::KVStore;
 
@@ -1244,8 +1616,6 @@ mod test {
             None,
             CancellationToken::new(),
             true,
-            None,
-            false,
         )
         .await
         .unwrap();
@@ -1284,8 +1654,6 @@ mod test {
             None,
             CancellationToken::new(),
             true,
-            None,
-            false,
         )
         .await
         .unwrap();
@@ -1328,8 +1696,6 @@ mod test {
                 None,
                 CancellationToken::new(),
                 true,
-                None,
-                false,
             )
             .await
             .unwrap(),
@@ -1376,8 +1742,6 @@ mod test {
             Some(prefix),
             CancellationToken::new(),
             true,
-            None,
-            false,
         )
         .await
         .unwrap();

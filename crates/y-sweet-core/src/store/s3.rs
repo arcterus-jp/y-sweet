@@ -2,7 +2,7 @@ use super::{Result, StoreError};
 use crate::store::Store;
 use async_trait::async_trait;
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aws_credential_types::Credentials as AwsCredentials;
 use aws_sdk_s3::primitives::ByteStream;
@@ -25,6 +25,25 @@ pub struct S3Config {
 
 const PRESIGNED_URL_DURATION: Duration = Duration::from_secs(60 * 60); // 60 min
 const UPLOAD_PRESIGNED_URL_DURATION: Duration = Duration::from_secs(15 * 60); // 15 min
+                                                                              // Cache-friendly S3 signed URLs:
+                                                                              // - We round the signing start time down to a fixed bucket so repeated calls yield the same URL.
+                                                                              // - `PRESIGNED_URL_DURATION` must be strictly greater than `PRESIGNED_URL_TIME_BUCKET` to avoid
+                                                                              //   a “near-expired immediately” URL at the end of a bucket.
+const PRESIGNED_URL_TIME_BUCKET: Duration = Duration::from_secs(30 * 60); // 30 min
+
+fn floor_system_time(now: SystemTime, bucket: Duration) -> SystemTime {
+    let bucket_secs = bucket.as_secs();
+    if bucket_secs == 0 {
+        return now;
+    }
+
+    let Ok(since_epoch) = now.duration_since(UNIX_EPOCH) else {
+        return now;
+    };
+
+    let floored_secs = (since_epoch.as_secs() / bucket_secs) * bucket_secs;
+    UNIX_EPOCH + Duration::from_secs(floored_secs)
+}
 
 pub struct S3Store {
     client: Client,
@@ -269,24 +288,38 @@ impl S3Store {
         self.init().await?;
         let k = self.prefixed_key(key);
 
-        let presign_conf =
-            aws_sdk_s3::presigning::PresigningConfig::expires_in(PRESIGNED_URL_DURATION).map_err(
-                |e| StoreError::ConnectionError(format!("Failed to create presigning config: {e}")),
-            )?;
+        let (start_time, cache_max_age_secs) = if PRESIGNED_URL_DURATION > PRESIGNED_URL_TIME_BUCKET
+        {
+            let start_time = floor_system_time(SystemTime::now(), PRESIGNED_URL_TIME_BUCKET);
+            let cache_max_age = PRESIGNED_URL_DURATION.saturating_sub(PRESIGNED_URL_TIME_BUCKET);
+            (start_time, cache_max_age.as_secs())
+        } else {
+            (SystemTime::now(), 0)
+        };
 
-        let req = self
-            .client
-            .get_object()
-            .bucket(&self.bucket)
-            .key(k)
-            .presigned(presign_conf)
-            .await
+        let presign_conf = aws_sdk_s3::presigning::PresigningConfig::builder()
+            .start_time(start_time)
+            .expires_in(PRESIGNED_URL_DURATION)
+            .build()
             .map_err(|e| {
-                StoreError::ConnectionError(format!(
-                    "Failed to generate download presigned URL for '{}' in bucket '{}': {e}",
-                    key, self.bucket
-                ))
+                StoreError::ConnectionError(format!("Failed to create presigning config: {e}"))
             })?;
+
+        let mut req = self.client.get_object().bucket(&self.bucket).key(k);
+
+        // Make the signed URL cache-friendly: the URL itself is stable within the time bucket,
+        // and the object response can be cached for at least `cache_max_age_secs` seconds.
+        if cache_max_age_secs > 0 {
+            req = req
+                .response_cache_control(format!("public, max-age={cache_max_age_secs}, immutable"));
+        }
+
+        let req = req.presigned(presign_conf).await.map_err(|e| {
+            StoreError::ConnectionError(format!(
+                "Failed to generate download presigned URL for '{}' in bucket '{}': {e}",
+                key, self.bucket
+            ))
+        })?;
 
         Ok(req.uri().to_string())
     }
@@ -430,5 +463,24 @@ impl Store for S3Store {
 
     async fn copy_document(&self, source_doc_id: &str, destination_doc_id: &str) -> Result<()> {
         S3Store::copy_document(self, source_doc_id, destination_doc_id).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn floor_system_time_rounds_down_to_bucket() {
+        let t = UNIX_EPOCH + Duration::from_secs(3700);
+        let rounded = floor_system_time(t, Duration::from_secs(1800));
+        assert_eq!(rounded, UNIX_EPOCH + Duration::from_secs(3600));
+    }
+
+    #[test]
+    fn floor_system_time_zero_bucket_is_identity() {
+        let t = UNIX_EPOCH + Duration::from_secs(123);
+        let rounded = floor_system_time(t, Duration::from_secs(0));
+        assert_eq!(rounded, t);
     }
 }

@@ -1,11 +1,6 @@
 use anyhow::Context;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use ddtrace::{
-    formatter::DatadogFormatter,
-    set_global_propagator,
-    tracer::{self, ProviderGuard},
-};
 use serde_json::json;
 use std::{
     env,
@@ -20,6 +15,7 @@ use tracing_subscriber::EnvFilter;
 use url::Url;
 use y_sweet::cli::{print_auth_message, print_server_url};
 use y_sweet::stores::filesystem::FileSystemStore;
+use y_sweet::tracing_setup::init_tracing;
 use y_sweet_core::{
     auth::Authenticator,
     store::{
@@ -58,6 +54,12 @@ enum ServSubcommand {
 
         #[clap(long)]
         prod: bool,
+
+        #[clap(long, env = "Y_SWEET_MAX_BODY_SIZE")]
+        max_body_size: Option<usize>,
+
+        #[clap(long, default_value = "false", env = "Y_SWEET_SKIP_GC")]
+        skip_gc: bool,
     },
 
     GenAuth {
@@ -87,6 +89,12 @@ enum ServSubcommand {
 
         #[clap(long, default_value = "10", env = "Y_SWEET_CHECKPOINT_FREQ_SECONDS")]
         checkpoint_freq_seconds: u64,
+
+        #[clap(long, env = "Y_SWEET_MAX_BODY_SIZE")]
+        max_body_size: Option<usize>,
+
+        #[clap(long, default_value = "false", env = "Y_SWEET_SKIP_GC")]
+        skip_gc: bool,
     },
 }
 
@@ -152,100 +160,16 @@ async fn get_store_from_opts(store_path: &str) -> Result<Box<dyn Store>> {
     }
 }
 
-fn init_tracing(filter: EnvFilter) -> Result<Option<ProviderGuard>> {
-    use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-
-    let tracing_disabled = std::env::var("DD_TRACE_ENABLED")
-        .map(|value| matches!(value.as_str(), "0") || value.eq_ignore_ascii_case("false"))
-        .unwrap_or(false);
-
-    if tracing_disabled {
-        let fmt_layer = tracing_subscriber::fmt::layer()
-            .json()
-            .with_timer(tracing_subscriber::fmt::time::UtcTime::rfc_3339())
-            .with_target(false)
-            .with_thread_ids(false)
-            .with_thread_names(false)
-            .with_file(false)
-            .with_line_number(false)
-            .with_current_span(true)
-            .with_span_list(false)
-            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::NONE);
-
-        tracing_subscriber::registry()
-            .with(filter)
-            .with(fmt_layer)
-            .init();
-
-        return Ok(None);
-    }
-
-    set_global_propagator();
-
-    if std::env::var("DD_VERSION").is_err() {
-        std::env::set_var("DD_VERSION", VERSION);
-    }
-
-    let service_name = std::env::var("DD_SERVICE").unwrap_or_else(|_| "y-sweet".to_string());
-
-    match tracer::build_layer(service_name) {
-        Ok((datadog_layer, guard)) => {
-            let fmt_layer = tracing_subscriber::fmt::layer()
-                .json()
-                .with_timer(tracing_subscriber::fmt::time::UtcTime::rfc_3339())
-                .with_target(false)
-                .with_thread_ids(false)
-                .with_thread_names(false)
-                .with_file(false)
-                .with_line_number(false)
-                .with_current_span(true)
-                .with_span_list(false)
-                .with_span_events(tracing_subscriber::fmt::format::FmtSpan::NONE)
-                .event_format(DatadogFormatter);
-
-            tracing_subscriber::registry()
-                .with(filter)
-                .with(fmt_layer)
-                .with(datadog_layer)
-                .init();
-
-            Ok(Some(guard))
-        }
-        Err(err) => {
-            let fmt_layer = tracing_subscriber::fmt::layer()
-                .json()
-                .with_timer(tracing_subscriber::fmt::time::UtcTime::rfc_3339())
-                .with_target(false)
-                .with_thread_ids(false)
-                .with_thread_names(false)
-                .with_file(false)
-                .with_line_number(false)
-                .with_current_span(true)
-                .with_span_list(false)
-                .with_span_events(tracing_subscriber::fmt::format::FmtSpan::NONE);
-
-            tracing_subscriber::registry()
-                .with(filter)
-                .with(fmt_layer)
-                .init();
-
-            eprintln!("datadog tracer initialization failed, continuing without APM: {err}");
-
-            Ok(None)
-        }
-    }
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     let opts = Opts::parse();
 
     // Logging: default WARN, override via Y_SWEET_LOG (e.g. "info", "debug", "trace" or full filter spec)
-    // Example: Y_SWEET_LOG=y_sweet=info,y_sweet_core=info,hyper=warn
+    // Example: Y_SWEET_LOG=y_sweet=debug,y_sweet_core=info,hyper=warn
     let filter = if let Ok(spec) = std::env::var("Y_SWEET_LOG") {
         EnvFilter::new(spec)
     } else {
-        EnvFilter::new("info")
+        EnvFilter::new("warn")
     };
     let _ddtrace_guard = init_tracing(filter)?;
 
@@ -258,6 +182,8 @@ async fn main() -> Result<()> {
             auth,
             url_prefix,
             prod,
+            max_body_size,
+            skip_gc,
         } => {
             let auth = if let Some(auth) = auth {
                 Some(Authenticator::new(auth)?)
@@ -302,6 +228,8 @@ async fn main() -> Result<()> {
                 url_prefix.clone(),
                 token.clone(),
                 true,
+                *max_body_size,
+                *skip_gc,
             )
             .await?;
 
@@ -363,6 +291,8 @@ async fn main() -> Result<()> {
             port,
             host,
             checkpoint_freq_seconds,
+            max_body_size,
+            skip_gc,
         } => {
             let doc_id = env::var("SESSION_BACKEND_KEY").expect("SESSION_BACKEND_KEY must be set");
 
@@ -408,6 +338,8 @@ async fn main() -> Result<()> {
                 None, // No URL prefix
                 cancellation_token.clone(),
                 false,
+                *max_body_size,
+                *skip_gc,
             )
             .await?;
 

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "y_sweet_sdk"
-version = "0.8.2"
+version = "0.9.1"
 description = "Python bindings for the Y-Sweet server"
 readme = "README.md"
 authors = [{ name = "Paul Butler", email = "paul@jamsocket.com" }]
@@ -16,7 +16,7 @@ classifiers = [
 ]
 dependencies = [
     "requests~=2.32.2",
-    "pycrdt~=0.9.11",
+    "pycrdt>=0.9.11,<0.13.0",
 ]
 requires-python = ">=3.12"
 

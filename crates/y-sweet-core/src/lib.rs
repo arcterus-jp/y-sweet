@@ -1,4 +1,5 @@
 pub mod api_types;
+pub mod api_types_ext;
 pub mod auth;
 pub mod doc_connection;
 pub mod doc_sync;
