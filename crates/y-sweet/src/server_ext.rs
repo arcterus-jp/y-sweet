@@ -8,7 +8,7 @@ use axum::{
 };
 use axum_extra::typed_header::TypedHeader;
 use cuid::cuid2;
-use std::sync::Arc;
+use std::sync::{atomic::Ordering, Arc};
 use tracing::{error, info};
 use y_sweet_core::{
     api_types::validate_doc_name,
@@ -480,9 +480,69 @@ pub async fn copy_document(
     }
 }
 
+fn escape_label(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+}
+
+/// GET /metrics — OpenMetrics endpoint for Datadog Agent scraping (no auth required)
+pub async fn metrics_handler(State(server): State<Arc<Server>>) -> impl IntoResponse {
+    let mut body = String::new();
+
+    body.push_str("# HELP ysweet_loaded_docs Currently loaded documents\n");
+    body.push_str("# TYPE ysweet_loaded_docs gauge\n");
+    body.push_str(&format!("ysweet_loaded_docs {}\n", server.docs.len()));
+
+    body.push_str("# HELP ysweet_doc_awareness_clients Awareness clients per document\n");
+    body.push_str("# TYPE ysweet_doc_awareness_clients gauge\n");
+    body.push_str("# HELP ysweet_doc_connections WebSocket connections per document\n");
+    body.push_str("# TYPE ysweet_doc_connections gauge\n");
+    body.push_str(
+        "# HELP ysweet_doc_size_bytes Document byte size (sum of sync_kv keys and values)\n",
+    );
+    body.push_str("# TYPE ysweet_doc_size_bytes gauge\n");
+
+    for entry in server.docs.iter() {
+        let doc_id = entry.key();
+        let dwskv = entry.value();
+        let clients = {
+            let aw = dwskv.awareness();
+            let g = aw.read().unwrap();
+            g.clients().len()
+        };
+        let conns = dwskv.connection_count().load(Ordering::Relaxed);
+        let size = dwskv.sync_kv().byte_size();
+        let escaped = escape_label(doc_id);
+        body.push_str(&format!(
+            "ysweet_doc_awareness_clients{{doc_id=\"{}\"}} {}\n",
+            escaped, clients
+        ));
+        body.push_str(&format!(
+            "ysweet_doc_connections{{doc_id=\"{}\"}} {}\n",
+            escaped, conns
+        ));
+        body.push_str(&format!(
+            "ysweet_doc_size_bytes{{doc_id=\"{}\"}} {}\n",
+            escaped, size
+        ));
+    }
+
+    body.push_str("# EOF\n");
+
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "application/openmetrics-text; version=1.0.0; charset=utf-8",
+        )],
+        body,
+    )
+}
+
 /// Extension routes for custom endpoints
 pub fn ext_routes(server: &Arc<Server>) -> Router {
     Router::new()
+        .route("/metrics", get(metrics_handler))
         .route("/d/:doc_id", delete(delete_document))
         .route("/d/:doc_id/copy", post(copy_document))
         .route("/d/:doc_id/assets", post(generate_upload_presigned_url))

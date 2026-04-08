@@ -1,6 +1,6 @@
 use crate::{doc_connection::DOC_NAME, store::Store, sync::awareness::Awareness, sync_kv::SyncKv};
 use anyhow::{anyhow, Context, Result};
-use std::sync::{Arc, RwLock};
+use std::sync::{atomic::AtomicUsize, Arc, RwLock};
 use yrs::{updates::decoder::Decode, ReadTxn, StateVector, Subscription, Transact, Update};
 use yrs_kvstore::DocOps;
 
@@ -9,6 +9,7 @@ pub struct DocWithSyncKv {
     sync_kv: Arc<SyncKv>,
     #[allow(unused)] // acts as RAII guard
     subscription: Subscription,
+    connection_count: Arc<AtomicUsize>,
 }
 
 impl DocWithSyncKv {
@@ -18,6 +19,10 @@ impl DocWithSyncKv {
 
     pub fn sync_kv(&self) -> Arc<SyncKv> {
         self.sync_kv.clone()
+    }
+
+    pub fn connection_count(&self) -> Arc<AtomicUsize> {
+        self.connection_count.clone()
     }
 
     pub async fn new<F>(
@@ -70,6 +75,7 @@ impl DocWithSyncKv {
             awareness,
             sync_kv,
             subscription,
+            connection_count: Arc::new(AtomicUsize::new(0)),
         })
     }
 
