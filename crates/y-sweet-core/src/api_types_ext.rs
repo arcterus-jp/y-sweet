@@ -75,3 +75,27 @@ pub struct DocDeleteResponse {
     /// Indicates that the delete operation completed without errors.
     pub success: bool,
 }
+
+/// Per-document metrics
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocMetrics {
+    /// The document ID
+    pub doc_id: String,
+    /// Number of awareness protocol clients
+    pub awareness_clients: usize,
+    /// Number of active WebSocket connections
+    pub connections: usize,
+    /// Document byte size (sum of sync_kv keys and values)
+    pub size_bytes: usize,
+}
+
+/// Server-wide metrics snapshot for capacity planning
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MetricsResponse {
+    /// Number of currently loaded documents
+    pub loaded_docs: usize,
+    /// Per-document metrics
+    pub docs: Vec<DocMetrics>,
+}

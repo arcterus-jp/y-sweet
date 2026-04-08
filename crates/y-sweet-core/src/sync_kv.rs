@@ -5,7 +5,7 @@ use std::{
     convert::Infallible,
     ops::Bound,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
     },
 };
@@ -18,6 +18,7 @@ pub struct SyncKv {
     dirty: AtomicBool,
     dirty_callback: Box<dyn Fn() + Send + Sync>,
     shutdown: AtomicBool,
+    byte_size: AtomicUsize,
 }
 
 impl SyncKv {
@@ -45,6 +46,10 @@ impl SyncKv {
         };
 
         let data_len = data.len();
+        let initial_byte_size: usize = data
+            .iter()
+            .map(|(k, v): (&Vec<u8>, &Vec<u8>)| k.len() + v.len())
+            .sum();
         tracing::debug!(
             "Created SyncKv with {} key-value pairs for key: {}",
             data_len,
@@ -58,6 +63,7 @@ impl SyncKv {
             dirty: AtomicBool::new(false),
             dirty_callback: Box::new(callback),
             shutdown: AtomicBool::new(false),
+            byte_size: AtomicUsize::new(initial_byte_size),
         })
     }
 
@@ -98,9 +104,25 @@ impl SyncKv {
 
     #[cfg(test)]
     fn set(&self, key: &[u8], value: &[u8]) {
-        let mut map = self.data.lock().unwrap();
-        map.insert(key.to_vec(), value.to_vec());
+        let delta = {
+            let mut map = self.data.lock().unwrap();
+            let old = map.insert(key.to_vec(), value.to_vec());
+            match old {
+                Some(old_val) => value.len() as isize - old_val.len() as isize,
+                None => (key.len() + value.len()) as isize,
+            }
+        };
+        if delta >= 0 {
+            self.byte_size.fetch_add(delta as usize, Ordering::Relaxed);
+        } else {
+            self.byte_size
+                .fetch_sub((-delta) as usize, Ordering::Relaxed);
+        }
         self.mark_dirty();
+    }
+
+    pub fn byte_size(&self) -> usize {
+        self.byte_size.load(Ordering::Relaxed)
     }
 
     pub fn len(&self) -> usize {
@@ -173,8 +195,13 @@ impl<'a> yrs_kvstore::KVStore<'a> for SyncKv {
     }
 
     fn remove(&self, key: &[u8]) -> Result<(), Self::Error> {
-        let mut map = self.data.lock().unwrap();
-        map.remove(key);
+        let removed_bytes = {
+            let mut map = self.data.lock().unwrap();
+            map.remove(key).map(|old_val| key.len() + old_val.len())
+        };
+        if let Some(n) = removed_bytes {
+            self.byte_size.fetch_sub(n, Ordering::Relaxed);
+        }
         self.mark_dirty();
         Ok(())
     }
@@ -197,16 +224,35 @@ impl<'a> yrs_kvstore::KVStore<'a> for SyncKv {
     }
 
     fn upsert(&self, key: &[u8], value: &[u8]) -> Result<(), Self::Error> {
-        let mut map = self.data.lock().unwrap();
-        map.insert(key.to_vec(), value.to_vec());
+        let delta = {
+            let mut map = self.data.lock().unwrap();
+            let old = map.insert(key.to_vec(), value.to_vec());
+            match old {
+                Some(old_val) => value.len() as isize - old_val.len() as isize,
+                None => (key.len() + value.len()) as isize,
+            }
+        };
+        if delta >= 0 {
+            self.byte_size.fetch_add(delta as usize, Ordering::Relaxed);
+        } else {
+            self.byte_size
+                .fetch_sub((-delta) as usize, Ordering::Relaxed);
+        }
         self.mark_dirty();
         Ok(())
     }
 
     fn remove_range(&self, from: &[u8], to: &[u8]) -> Result<(), Self::Error> {
-        for entry in self.iter_range(from, to)? {
-            let mut map = self.data.lock().unwrap();
-            map.remove(&entry.key);
+        let entries: Vec<_> = self.iter_range(from, to)?.collect();
+        for entry in &entries {
+            let removed = {
+                let mut map = self.data.lock().unwrap();
+                map.remove(&entry.key).is_some()
+            };
+            if removed {
+                self.byte_size
+                    .fetch_sub(entry.key.len() + entry.value.len(), Ordering::Relaxed);
+            }
         }
         self.mark_dirty();
         Ok(())

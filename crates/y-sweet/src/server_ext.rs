@@ -8,13 +8,13 @@ use axum::{
 };
 use axum_extra::typed_header::TypedHeader;
 use cuid::cuid2;
-use std::sync::Arc;
+use std::sync::{atomic::Ordering, Arc};
 use tracing::{error, info};
 use y_sweet_core::{
     api_types::validate_doc_name,
     api_types_ext::{
         AssetUrl, AssetsResponse, ContentUploadRequest, ContentUploadResponse, DocCopyRequest,
-        DocCopyResponse, DocDeleteResponse,
+        DocCopyResponse, DocDeleteResponse, DocMetrics, MetricsResponse,
     },
     store::StoreError,
 };
@@ -480,9 +480,36 @@ pub async fn copy_document(
     }
 }
 
+/// GET /metrics — JSON metrics endpoint for capacity planning (no auth required)
+pub async fn metrics_handler(State(server): State<Arc<Server>>) -> Json<MetricsResponse> {
+    let docs: Vec<DocMetrics> = server
+        .docs
+        .iter()
+        .map(|entry| {
+            let dwskv = entry.value();
+            let awareness_clients = {
+                let aw = dwskv.awareness();
+                let g = aw.read().unwrap();
+                g.clients().len()
+            };
+            DocMetrics {
+                doc_id: entry.key().clone(),
+                awareness_clients,
+                connections: dwskv.connection_count().load(Ordering::Relaxed),
+                size_bytes: dwskv.sync_kv().byte_size(),
+            }
+        })
+        .collect();
+    Json(MetricsResponse {
+        loaded_docs: server.docs.len(),
+        docs,
+    })
+}
+
 /// Extension routes for custom endpoints
 pub fn ext_routes(server: &Arc<Server>) -> Router {
     Router::new()
+        .route("/metrics", get(metrics_handler))
         .route("/d/:doc_id", delete(delete_document))
         .route("/d/:doc_id/copy", post(copy_document))
         .route("/d/:doc_id/assets", post(generate_upload_presigned_url))
