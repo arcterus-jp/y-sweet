@@ -777,6 +777,7 @@ async fn handle_socket_upgrade(
         let span = tracing::info_span!("ws.session", doc_id = %doc_id);
         handle_socket(
             socket,
+            doc_id,
             awareness,
             connection_count,
             authorization,
@@ -846,6 +847,7 @@ impl Drop for ConnectionGuard {
 
 async fn handle_socket(
     socket: WebSocket,
+    doc_id: String,
     awareness: Arc<RwLock<Awareness>>,
     connection_count: Arc<AtomicUsize>,
     authorization: Authorization,
@@ -909,7 +911,7 @@ async fn handle_socket(
         }
     });
 
-    let connection = DocConnection::new(awareness, authorization, move |bytes| {
+    let connection = DocConnection::new(doc_id, awareness, authorization, move |bytes| {
         if let Err(e) = send.try_send(bytes.to_vec()) {
             let error_message = format!("WebSocket message error: {}", e);
             warn!(
