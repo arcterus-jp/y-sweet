@@ -33,7 +33,7 @@ use tokio::{
     sync::mpsc::{channel, Receiver},
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
-use tracing::{error, info, span, warn, Level};
+use tracing::{error, info, span, warn, Instrument, Level};
 use url::Url;
 use y_sweet_core::{
     api_types::{
@@ -774,6 +774,7 @@ async fn handle_socket_upgrade(
     let cancellation_token = server_state.cancellation_token.clone();
 
     Ok(ws.on_upgrade(move |socket| {
+        let span = tracing::info_span!("ws.session", doc_id = %doc_id);
         handle_socket(
             socket,
             awareness,
@@ -781,6 +782,7 @@ async fn handle_socket_upgrade(
             authorization,
             cancellation_token,
         )
+        .instrument(span)
     }))
 }
 
