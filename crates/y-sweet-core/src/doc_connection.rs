@@ -34,6 +34,7 @@ pub struct DocConnection {
     authorization: Authorization,
     callback: Callback,
     closed: Arc<OnceLock<()>>,
+    doc_id: String,
 
     /// If the client sends an awareness state, this will be set to its client ID.
     /// It is used to clear the awareness state when a client disconnects.
@@ -43,6 +44,7 @@ pub struct DocConnection {
 impl DocConnection {
     #[cfg(not(feature = "sync"))]
     pub fn new<F>(
+        doc_id: String,
         awareness: Arc<RwLock<Awareness>>,
         authorization: Authorization,
         callback: F,
@@ -50,11 +52,12 @@ impl DocConnection {
     where
         F: Fn(&[u8]) + 'static,
     {
-        Self::new_inner(awareness, authorization, Arc::new(callback))
+        Self::new_inner(doc_id, awareness, authorization, Arc::new(callback))
     }
 
     #[cfg(feature = "sync")]
     pub fn new<F>(
+        doc_id: String,
         awareness: Arc<RwLock<Awareness>>,
         authorization: Authorization,
         callback: F,
@@ -62,10 +65,11 @@ impl DocConnection {
     where
         F: Fn(&[u8]) + 'static + Send + Sync,
     {
-        Self::new_inner(awareness, authorization, Arc::new(callback))
+        Self::new_inner(doc_id, awareness, authorization, Arc::new(callback))
     }
 
     pub fn new_inner(
+        doc_id: String,
         awareness: Arc<RwLock<Awareness>>,
         authorization: Authorization,
         callback: Callback,
@@ -79,7 +83,7 @@ impl DocConnection {
             // https://github.com/y-crdt/y-sync/blob/56958e83acfd1f3c09f5dd67cf23c9c72f000707/src/sync.rs#L45-L54
 
             {
-                let span = tracing::info_span!("ws.initial_sync");
+                let span = tracing::info_span!("ws.initial_sync", doc_id = %doc_id);
                 let _guard = span.enter();
 
                 {
@@ -150,12 +154,14 @@ impl DocConnection {
             callback,
             client_id: OnceLock::new(),
             closed,
+            doc_id,
         }
     }
 
     pub async fn send(&self, update: &[u8]) -> Result<(), anyhow::Error> {
         let span = tracing::info_span!(
             "ws.message.process",
+            doc_id = %self.doc_id,
             message_type = tracing::field::Empty,
             payload_size = update.len(),
         );

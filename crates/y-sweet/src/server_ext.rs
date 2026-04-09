@@ -14,7 +14,7 @@ use y_sweet_core::{
     api_types::validate_doc_name,
     api_types_ext::{
         AssetUrl, AssetsResponse, ContentUploadRequest, ContentUploadResponse, DocCopyRequest,
-        DocCopyResponse, DocDeleteResponse, DocMetrics, MetricsResponse,
+        DocCopyResponse, DocDeleteResponse,
     },
     store::StoreError,
 };
@@ -480,30 +480,82 @@ pub async fn copy_document(
     }
 }
 
-/// GET /metrics — JSON metrics endpoint for capacity planning (no auth required)
-pub async fn metrics_handler(State(server): State<Arc<Server>>) -> Json<MetricsResponse> {
-    let docs: Vec<DocMetrics> = server
+/// GET /metrics — OpenMetrics endpoint for capacity planning (no auth required)
+pub async fn metrics_handler(State(server): State<Arc<Server>>) -> impl IntoResponse {
+    struct DocSample {
+        doc_id_label: String,
+        connections: usize,
+        awareness_clients: usize,
+        size_bytes: usize,
+    }
+
+    let samples: Vec<DocSample> = server
         .docs
         .iter()
         .map(|entry| {
             let dwskv = entry.value();
+            let doc_id_label = entry
+                .key()
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"")
+                .replace('\n', "\\n");
             let awareness_clients = {
                 let aw = dwskv.awareness();
                 let g = aw.read().unwrap();
                 g.clients().len()
             };
-            DocMetrics {
-                doc_id: entry.key().clone(),
-                awareness_clients,
+            DocSample {
+                doc_id_label,
                 connections: dwskv.connection_count().load(Ordering::Relaxed),
+                awareness_clients,
                 size_bytes: dwskv.sync_kv().byte_size(),
             }
         })
         .collect();
-    Json(MetricsResponse {
-        loaded_docs: server.docs.len(),
-        docs,
-    })
+
+    let mut body = String::new();
+
+    body.push_str("# HELP ysweet_loaded_docs Number of currently loaded documents.\n");
+    body.push_str("# TYPE ysweet_loaded_docs gauge\n");
+    body.push_str(&format!("ysweet_loaded_docs {}\n", server.docs.len()));
+
+    body.push_str("# HELP ysweet_doc_connections Active WebSocket connections per document.\n");
+    body.push_str("# TYPE ysweet_doc_connections gauge\n");
+    for s in &samples {
+        body.push_str(&format!(
+            "ysweet_doc_connections{{doc_id=\"{}\"}} {}\n",
+            s.doc_id_label, s.connections
+        ));
+    }
+
+    body.push_str("# HELP ysweet_doc_awareness_clients Awareness clients per document.\n");
+    body.push_str("# TYPE ysweet_doc_awareness_clients gauge\n");
+    for s in &samples {
+        body.push_str(&format!(
+            "ysweet_doc_awareness_clients{{doc_id=\"{}\"}} {}\n",
+            s.doc_id_label, s.awareness_clients
+        ));
+    }
+
+    body.push_str("# HELP ysweet_doc_size_bytes SyncKV byte size per document.\n");
+    body.push_str("# TYPE ysweet_doc_size_bytes gauge\n");
+    for s in &samples {
+        body.push_str(&format!(
+            "ysweet_doc_size_bytes{{doc_id=\"{}\"}} {}\n",
+            s.doc_id_label, s.size_bytes
+        ));
+    }
+
+    body.push_str("# EOF\n");
+
+    (
+        axum::http::StatusCode::OK,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "application/openmetrics-text; version=1.0.0; charset=utf-8",
+        )],
+        body,
+    )
 }
 
 /// Extension routes for custom endpoints

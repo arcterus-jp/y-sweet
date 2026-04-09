@@ -177,7 +177,7 @@ async fn websocket_connect(req: Request, ctx: RouteContext<&mut YServe>) -> Resu
 
     let connection = {
         let server = server.clone();
-        DocConnection::new(awareness, Authorization::Full, move |bytes| {
+        DocConnection::new(doc_id.clone(), awareness, Authorization::Full, move |bytes| {
             let uint8_array = Uint8Array::from(bytes);
             let result = server
                 .as_ref()
