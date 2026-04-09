@@ -177,16 +177,21 @@ async fn websocket_connect(req: Request, ctx: RouteContext<&mut YServe>) -> Resu
 
     let connection = {
         let server = server.clone();
-        DocConnection::new(doc_id.clone(), awareness, Authorization::Full, move |bytes| {
-            let uint8_array = Uint8Array::from(bytes);
-            let result = server
-                .as_ref()
-                .send_with_array_buffer(&uint8_array.buffer());
+        DocConnection::new(
+            doc_id.clone(),
+            awareness,
+            Authorization::Full,
+            move |bytes| {
+                let uint8_array = Uint8Array::from(bytes);
+                let result = server
+                    .as_ref()
+                    .send_with_array_buffer(&uint8_array.buffer());
 
-            if let Err(result) = result {
-                console_log!("Error sending bytes: {:?}", result);
-            }
-        })
+                if let Err(result) = result {
+                    console_log!("Error sending bytes: {:?}", result);
+                }
+            },
+        )
     };
 
     wasm_bindgen_futures::spawn_local(async move {
