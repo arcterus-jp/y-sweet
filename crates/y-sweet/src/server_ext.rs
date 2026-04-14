@@ -513,6 +513,10 @@ pub async fn metrics_handler(State(server): State<Arc<Server>>) -> impl IntoResp
         })
         .collect();
 
+    let mut samples = samples;
+    samples.sort_by(|a, b| b.connections.cmp(&a.connections));
+    samples.truncate(10);
+
     let mut body = String::new();
 
     body.push_str("# HELP ysweet_loaded_docs Number of currently loaded documents.\n");
