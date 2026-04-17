@@ -77,6 +77,8 @@ tags:
     description: Real-time document synchronization via WebSocket
   - name: Single Document Mode
     description: Endpoints for single-document mode (special use case)
+  - name: Monitoring
+    description: Metrics endpoints for capacity planning
 
 components:
   securitySchemes:
@@ -100,6 +102,54 @@ components:
         - `read-only`: Read-only access
 
   schemas:
+    MetricsResponse:
+      type: object
+      required:
+        - loadedDocs
+        - docs
+      properties:
+        loadedDocs:
+          type: integer
+          format: int64
+          minimum: 0
+          example: 1
+          description: Number of currently loaded documents
+        docs:
+          type: array
+          items:
+            $ref: "#/components/schemas/DocMetrics"
+          description: Per-document metrics
+      description: Server-wide metrics snapshot
+
+    DocMetrics:
+      type: object
+      required:
+        - docId
+        - awarenessClients
+        - connections
+        - sizeBytes
+      properties:
+        docId:
+          type: string
+          example: "Umh3EEJPWElRVYj0B3G4K"
+          description: The document ID
+        awarenessClients:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Number of awareness protocol clients
+        connections:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Number of active WebSocket connections
+        sizeBytes:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Document byte size (sum of sync_kv keys and values)
+      description: Per-document metrics
+
     ReadyResponse:
       type: object
       required:
@@ -300,6 +350,27 @@ components:
           description: List of assets associated with the document
 
 paths:
+  /metrics:
+    get:
+      operationId: getMetrics
+      summary: Get server metrics
+      description: |
+        Returns a JSON snapshot of per-document metrics (awareness clients, WebSocket
+        connections, byte size) for capacity planning. Intended to be scraped by a
+        Datadog Agent sidecar over localhost within ECS.
+
+        **Audience**: 🔓 Public API (no authentication required, localhost only)
+      tags:
+        - Public API
+        - Monitoring
+      responses:
+        "200":
+          description: Metrics snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MetricsResponse"
+
   /ready:
     get:
       operationId: healthCheck

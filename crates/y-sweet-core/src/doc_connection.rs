@@ -34,6 +34,7 @@ pub struct DocConnection {
     authorization: Authorization,
     callback: Callback,
     closed: Arc<OnceLock<()>>,
+    doc_id: String,
 
     /// If the client sends an awareness state, this will be set to its client ID.
     /// It is used to clear the awareness state when a client disconnects.
@@ -43,6 +44,7 @@ pub struct DocConnection {
 impl DocConnection {
     #[cfg(not(feature = "sync"))]
     pub fn new<F>(
+        doc_id: String,
         awareness: Arc<RwLock<Awareness>>,
         authorization: Authorization,
         callback: F,
@@ -50,11 +52,12 @@ impl DocConnection {
     where
         F: Fn(&[u8]) + 'static,
     {
-        Self::new_inner(awareness, authorization, Arc::new(callback))
+        Self::new_inner(doc_id, awareness, authorization, Arc::new(callback))
     }
 
     #[cfg(feature = "sync")]
     pub fn new<F>(
+        doc_id: String,
         awareness: Arc<RwLock<Awareness>>,
         authorization: Authorization,
         callback: F,
@@ -62,10 +65,11 @@ impl DocConnection {
     where
         F: Fn(&[u8]) + 'static + Send + Sync,
     {
-        Self::new_inner(awareness, authorization, Arc::new(callback))
+        Self::new_inner(doc_id, awareness, authorization, Arc::new(callback))
     }
 
     pub fn new_inner(
+        doc_id: String,
         awareness: Arc<RwLock<Awareness>>,
         authorization: Authorization,
         callback: Callback,
@@ -79,18 +83,23 @@ impl DocConnection {
             // https://github.com/y-crdt/y-sync/blob/56958e83acfd1f3c09f5dd67cf23c9c72f000707/src/sync.rs#L45-L54
 
             {
-                // Send a server-side state vector, so that the client can send
-                // updates that happened offline.
-                let sv = awareness.doc().transact().state_vector();
-                let sync_step_1 = Message::Sync(SyncMessage::SyncStep1(sv)).encode_v1();
-                callback(&sync_step_1);
-            }
+                let span = tracing::info_span!("ws.initial_sync", doc_id = %doc_id);
+                let _guard = span.enter();
 
-            {
-                // Send the initial awareness state.
-                let update = awareness.update().unwrap();
-                let awareness = Message::Awareness(update).encode_v1();
-                callback(&awareness);
+                {
+                    // Send a server-side state vector, so that the client can send
+                    // updates that happened offline.
+                    let sv = awareness.doc().transact().state_vector();
+                    let sync_step_1 = Message::Sync(SyncMessage::SyncStep1(sv)).encode_v1();
+                    callback(&sync_step_1);
+                }
+
+                {
+                    // Send the initial awareness state.
+                    let update = awareness.update().unwrap();
+                    let awareness = Message::Awareness(update).encode_v1();
+                    callback(&awareness);
+                }
             }
 
             let doc_subscription = {
@@ -145,11 +154,34 @@ impl DocConnection {
             callback,
             client_id: OnceLock::new(),
             closed,
+            doc_id,
         }
     }
 
     pub async fn send(&self, update: &[u8]) -> Result<(), anyhow::Error> {
+        let span = tracing::info_span!(
+            "ws.message.process",
+            doc_id = %self.doc_id,
+            message_type = tracing::field::Empty,
+            payload_size = update.len(),
+        );
+        let _guard = span.enter();
+
         let msg = Message::decode_v1(update)?;
+
+        span.record(
+            "message_type",
+            match &msg {
+                Message::Sync(SyncMessage::SyncStep1(_)) => "sync_step1",
+                Message::Sync(SyncMessage::SyncStep2(_)) => "sync_step2",
+                Message::Sync(SyncMessage::Update(_)) => "sync_update",
+                Message::Auth(_) => "auth",
+                Message::AwarenessQuery => "awareness_query",
+                Message::Awareness(_) => "awareness",
+                Message::Custom(_, _) => "custom",
+            },
+        );
+
         let result = self.handle_msg(&DefaultProtocol, msg)?;
 
         if let Some(result) = result {

@@ -22,7 +22,10 @@ use http_body_util::BodyExt;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
-    sync::{Arc, RwLock},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, RwLock,
+    },
     time::{Duration, Instant},
 };
 use tokio::{
@@ -30,7 +33,7 @@ use tokio::{
     sync::mpsc::{channel, Receiver},
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
-use tracing::{error, info, span, warn, Level};
+use tracing::{error, info, span, warn, Instrument, Level};
 use url::Url;
 use y_sweet_core::{
     api_types::{
@@ -767,10 +770,20 @@ async fn handle_socket_upgrade(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     let awareness = dwskv.awareness();
+    let connection_count = dwskv.connection_count();
     let cancellation_token = server_state.cancellation_token.clone();
 
     Ok(ws.on_upgrade(move |socket| {
-        handle_socket(socket, awareness, authorization, cancellation_token)
+        let span = tracing::info_span!("ws.session", doc_id = %doc_id);
+        handle_socket(
+            socket,
+            doc_id,
+            awareness,
+            connection_count,
+            authorization,
+            cancellation_token,
+        )
+        .instrument(span)
     }))
 }
 
@@ -825,12 +838,24 @@ async fn handle_socket_upgrade_single(
     handle_socket_upgrade(ws, Path(single_doc_id), authorization, State(server_state)).await
 }
 
+struct ConnectionGuard(Arc<AtomicUsize>);
+impl Drop for ConnectionGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 async fn handle_socket(
     socket: WebSocket,
+    doc_id: String,
     awareness: Arc<RwLock<Awareness>>,
+    connection_count: Arc<AtomicUsize>,
     authorization: Authorization,
     cancellation_token: CancellationToken,
 ) {
+    connection_count.fetch_add(1, Ordering::Relaxed);
+    let _conn_guard = ConnectionGuard(connection_count);
+
     let (mut sink, mut stream) = socket.split();
     let (send, mut recv) = channel(1024);
 
@@ -886,7 +911,7 @@ async fn handle_socket(
         }
     });
 
-    let connection = DocConnection::new(awareness, authorization, move |bytes| {
+    let connection = DocConnection::new(doc_id, awareness, authorization, move |bytes| {
         if let Err(e) = send.try_send(bytes.to_vec()) {
             let error_message = format!("WebSocket message error: {}", e);
             warn!(
