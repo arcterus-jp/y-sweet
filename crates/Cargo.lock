@@ -4097,6 +4097,7 @@ dependencies = [
  "axum-extra",
  "clap",
  "colored",
+ "crc32fast",
  "cuid",
  "dashmap",
  "ddtrace",
