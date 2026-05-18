@@ -1,0 +1,85 @@
+name: Publish JS Packages to GitHub Packages
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "js-pkg/sdk/package.json"
+      - "js-pkg/client/package.json"
+      - "js-pkg/react/package.json"
+      - "js-pkg/create-y-sweet-app/package.json"
+      - "js-pkg/**"
+      - ".github/workflows/publish-github-packages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.CCN_GH_APP_ID }}
+          private-key: ${{ secrets.CCN_GH_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Configure npm for GitHub Packages
+        run: |
+          cat <<'EOF' > "$HOME/.npmrc"
+          @y-sweet:registry=https://npm.pkg.github.com
+          //npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}
+          always-auth=true
+          EOF
+        env:
+          NODE_AUTH_TOKEN: ${{ steps.app-token.outputs.token }}
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build workspace packages
+        run: npm run build
+
+      - name: Publish packages
+        env:
+          NODE_AUTH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REGISTRY_URL: https://npm.pkg.github.com
+        run: |
+          set -euo pipefail
+
+          publish_if_needed () {
+            local pkg_dir="$1"
+            local pkg_name
+            local pkg_version
+
+            pkg_name="$(npm pkg get name --prefix "$pkg_dir" | tr -d '"')"
+            pkg_version="$(npm pkg get version --prefix "$pkg_dir" | tr -d '"')"
+
+            echo "Checking $pkg_name@$pkg_version"
+            if npm view "$pkg_name@$pkg_version" version --registry="$REGISTRY_URL" >/dev/null 2>&1; then
+              echo "Already published: $pkg_name@$pkg_version (skip)"
+              return 0
+            fi
+
+            echo "Publishing $pkg_name@$pkg_version"
+            npm publish --prefix "$pkg_dir" --registry="$REGISTRY_URL"
+          }
+
+          publish_if_needed js-pkg/sdk
+          publish_if_needed js-pkg/client
+          publish_if_needed js-pkg/react
+          publish_if_needed js-pkg/create-y-sweet-app

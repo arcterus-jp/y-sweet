@@ -1,4 +1,4 @@
-This is a [Y-Sweet](https://jamsocket.com/y-sweet) project using [Remix](https://remix.run). It was bootstrapped with [`create-y-sweet-app`](https://www.npmjs.com/package/create-y-sweet-app).
+This is a [Y-Sweet](https://jamsocket.com/y-sweet) project using [Remix](https://remix.run). It was bootstrapped with [`@y-sweet/create-y-sweet-app`](https://www.npmjs.com/package/@y-sweet/create-y-sweet-app).
 
 ## Getting Started
 
