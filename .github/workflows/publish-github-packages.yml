@@ -69,7 +69,10 @@ jobs:
             fi
 
             echo "Publishing $pkg_name@$pkg_version"
-            npm publish --prefix "$pkg_dir" --registry="$REGISTRY_URL"
+            (
+              cd "$pkg_dir"
+              npm publish --registry="$REGISTRY_URL"
+            )
           }
 
           publish_if_needed js-pkg/sdk
