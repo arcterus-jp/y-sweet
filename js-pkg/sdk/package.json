@@ -1,5 +1,5 @@
 {
-  "name": "@y-sweet/sdk",
+  "name": "@arcterus-jp/sdk",
   "scripts": {
     "build": "tsup",
     "clean": "rm -rf dist",

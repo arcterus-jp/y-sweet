@@ -1,5 +1,5 @@
 {
-  "name": "@y-sweet/client",
+  "name": "@arcterus-jp/client",
   "scripts": {
     "build": "tsup",
     "clean": "rm -rf dist",
@@ -46,7 +46,7 @@
     "yjs": "^13.0.0"
   },
   "dependencies": {
-    "@y-sweet/sdk": "0.9.1",
+    "@arcterus-jp/sdk": "0.9.1",
     "y-protocols": "^1.0.5"
   }
 }

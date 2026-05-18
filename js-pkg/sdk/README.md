@@ -1,16 +1,16 @@
 <img src="https://raw.githubusercontent.com/drifting-in-space/y-sweet/main/logo.svg" />
 
-# @y-sweet/sdk
+# @arcterus-jp/sdk
 
 [![GitHub Repo stars](https://img.shields.io/github/stars/drifting-in-space/y-sweet?style=social)](https://github.com/drifting-in-space/y-sweet)
 [![Chat on Discord](https://img.shields.io/static/v1?label=chat&message=discord&color=404eed)](https://discord.gg/N5sEpsuhh9)
-[![npm](https://img.shields.io/npm/v/@y-sweet/sdk)](https://www.npmjs.com/package/@y-sweet/sdk)
+[![npm](https://img.shields.io/npm/v/@arcterus-jp/sdk)](https://www.npmjs.com/package/@arcterus-jp/sdk)
 
 JavaScript/TypeScript backend SDK for building collaboration features with y-sweet.
 
 ## Installation
 ```
-npm install @y-sweet/sdk
+npm install @arcterus-jp/sdk
 ```
 
 ## Documentation
@@ -21,7 +21,7 @@ Explore our [collaborative examples](https://github.com/drifting-in-space/y-swee
 
 All examples are open source and live in this repository, within [/examples](https://github.com/drifting-in-space/y-sweet/tree/main/examples).
 
-# Using @y-sweet/sdk
+# Using @arcterus-jp/sdk
 
 Here’s how access control works in y-sweet:
 
@@ -37,8 +37,8 @@ of the same. This makes it easy to store the server token in a secret store, and
 
 
 ``` tsx filename="Home.tsx"
-import { YDocProvider } from '@y-sweet/react'
-import { getOrCreateDocAndToken } from '@y-sweet/sdk'
+import { YDocProvider } from '@arcterus-jp/react'
+import { getOrCreateDocAndToken } from '@arcterus-jp/sdk'
 
 type HomeProps = {
   searchParams: Record<string, string>

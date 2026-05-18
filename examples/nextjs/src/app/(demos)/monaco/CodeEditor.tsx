@@ -3,7 +3,7 @@
 import React, { useEffect, useState, useCallback, useMemo } from 'react'
 import { Editor } from '@monaco-editor/react'
 import { MonacoBinding } from 'y-monaco'
-import { useYDoc, useAwareness, useYjsProvider } from '@y-sweet/react'
+import { useYDoc, useAwareness, useYjsProvider } from '@arcterus-jp/react'
 import { editor } from 'monaco-editor'
 import Header from '@/components/Header'
 

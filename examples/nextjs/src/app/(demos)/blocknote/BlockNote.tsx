@@ -1,6 +1,6 @@
 'use client'
 
-import { useYDoc, useYjsProvider } from '@y-sweet/react'
+import { useYDoc, useYjsProvider } from '@arcterus-jp/react'
 import { useCreateBlockNote } from '@blocknote/react'
 import { BlockNoteView } from '@blocknote/mantine'
 import '@blocknote/mantine/style.css'

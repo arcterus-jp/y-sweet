@@ -2,8 +2,8 @@ import { expect, test } from 'vitest'
 import * as Y from 'yjs'
 import { spawn } from 'child_process'
 import { CRATE_BASE, Server } from './server'
-import { DocumentManager } from '@y-sweet/sdk'
-import { createYjsProvider } from '@y-sweet/react'
+import { DocumentManager } from '@arcterus-jp/sdk'
+import { createYjsProvider } from '@arcterus-jp/react'
 
 async function convertDoc(doc: Y.Doc, docId: string, store: string) {
   const update = Y.encodeStateAsUpdate(doc)

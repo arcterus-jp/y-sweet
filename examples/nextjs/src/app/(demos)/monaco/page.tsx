@@ -1,4 +1,4 @@
-import { YDocProvider } from '@y-sweet/react'
+import { YDocProvider } from '@arcterus-jp/react'
 import { randomId } from '@/lib/utils'
 import { CodeEditor } from './CodeEditor'
 

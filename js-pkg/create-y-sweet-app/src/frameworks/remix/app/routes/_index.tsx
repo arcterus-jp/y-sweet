@@ -1,5 +1,5 @@
 import { type MetaFunction } from "@remix-run/react";
-import { YDocProvider } from "@y-sweet/react";
+import { YDocProvider } from "@arcterus-jp/react";
 
 import { App } from "~/components/App";
 

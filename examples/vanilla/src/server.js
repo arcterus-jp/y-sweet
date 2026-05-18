@@ -1,6 +1,6 @@
 import express from 'express'
 import cors from 'cors'
-import { getOrCreateDocAndToken } from '@y-sweet/sdk'
+import { getOrCreateDocAndToken } from '@arcterus-jp/sdk'
 
 const app = express()
 app.use(cors())

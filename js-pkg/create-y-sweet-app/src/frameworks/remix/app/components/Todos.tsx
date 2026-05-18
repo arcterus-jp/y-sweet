@@ -1,6 +1,6 @@
 "use client";
 
-import { useMap, useYSweetDebugUrl } from "@y-sweet/react";
+import { useMap, useYSweetDebugUrl } from "@arcterus-jp/react";
 
 export function Todos() {
   const debugUrl = useYSweetDebugUrl();

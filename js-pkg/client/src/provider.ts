@@ -1,4 +1,4 @@
-import { encodeClientToken, type ClientToken } from '@y-sweet/sdk'
+import { encodeClientToken, type ClientToken } from '@arcterus-jp/sdk'
 import * as decoding from 'lib0/decoding'
 import * as encoding from 'lib0/encoding'
 import * as awarenessProtocol from 'y-protocols/awareness'

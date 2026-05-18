@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, expect, test } from 'vitest'
 import { ChildProcess, spawn } from 'child_process'
 import { dirname, join } from 'path'
-import { ClientToken, DocConnection } from '@y-sweet/sdk'
+import { ClientToken, DocConnection } from '@arcterus-jp/sdk'
 import * as Y from 'yjs'
 
 const CRATE_BASE = join(dirname(__filename), '..', '..', 'crates')

@@ -6,9 +6,9 @@ import {
   createYjsProvider,
   EVENT_LOCAL_CHANGES,
   EVENT_CONNECTION_STATUS,
-} from '@y-sweet/client'
-import type { AuthEndpoint, YSweetStatus } from '@y-sweet/client'
-import type { ClientToken } from '@y-sweet/sdk'
+} from '@arcterus-jp/client'
+import type { AuthEndpoint, YSweetStatus } from '@arcterus-jp/client'
+import type { ClientToken } from '@arcterus-jp/sdk'
 import type { ReactNode } from 'react'
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
 import type { Awareness } from 'y-protocols/awareness'

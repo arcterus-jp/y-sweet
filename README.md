@@ -19,20 +19,20 @@
 
 The Y-Sweet server can be used by any Yjs app, or you can use our opinionated stack to integrate Yjs and Y-Sweet into a Next.js app.
 
-- `@y-sweet/create-y-sweet-app`, a command line tool to quickly create a Y-Sweet app.
-- `@y-sweet/sdk`, a TypeScript library for interacting with `y-sweet-server` from your application backend.
-- `@y-sweet/client`, a TypeScript library for syncing documents from a client to a Y-Sweet server.
-- `@y-sweet/react`, a library of React hooks for connecting to a Y-Sweet server and manipulating Yjs docs.
+- `@arcterus-jp/create-y-sweet-app`, a command line tool to quickly create a Y-Sweet app.
+- `@arcterus-jp/sdk`, a TypeScript library for interacting with `y-sweet-server` from your application backend.
+- `@arcterus-jp/client`, a TypeScript library for syncing documents from a client to a Y-Sweet server.
+- `@arcterus-jp/react`, a library of React hooks for connecting to a Y-Sweet server and manipulating Yjs docs.
 - A [debugger](https://docs.jamsocket.com/y-sweet/features/debugger) for exploring Yjs document and presence state.
 
 Y-Sweet is MIT-licensed, and was created by [Jamsocket](https://jamsocket.com).
 
 ## Getting started
 
-The easiest way to start a Y-Sweet project is with the `@y-sweet/create-y-sweet-app` command line tool:
+The easiest way to start a Y-Sweet project is with the `@arcterus-jp/create-y-sweet-app` command line tool:
 
 ```sh
-npx @y-sweet/create-y-sweet-app@latest
+npx @arcterus-jp/create-y-sweet-app@latest
 ```
 
 For more information, check out our [documentation](https://docs.jamsocket.com/y-sweet).
@@ -64,7 +64,7 @@ Check the [vanilla js example](/examples/vanilla/) for more details.
 ### On the client
 ``` js
 import * as Y from 'yjs';
-import { createYjsProvider } from '@y-sweet/client';
+import { createYjsProvider } from '@arcterus-jp/client';
 
 // Create the Yjs doc and link it to the Y-Sweet server:
 const doc = new Y.Doc();
@@ -86,7 +86,7 @@ mySharedMap.observe((event) => {
 
 ### On the server
 ``` js
-import { DocumentManager } from '@y-sweet/sdk';
+import { DocumentManager } from '@arcterus-jp/sdk';
 
 // Pass in a CONNECTION_STRING, which you can get from a Y-Sweet service in the Jamsocket dashboard or from running npx y-sweet@latest serve locally
 const manager = new DocumentManager(CONNECTION_STRING);
@@ -134,9 +134,9 @@ If the directory starts with `s3://`, Y-Sweet will treat it as an S3-compatible 
 
 | Package Manager | Name | Version | Path |
 | --- | ---- | ---- | ---- |
-| npm | `@y-sweet/sdk` | [![npm](https://img.shields.io/npm/v/@y-sweet/sdk)](https://www.npmjs.com/package/@y-sweet/sdk) | `js-pkg/sdk` |
-| npm | `@y-sweet/client` | [![npm](https://img.shields.io/npm/v/@y-sweet/client)](https://www.npmjs.com/package/@y-sweet/client) | `js-pkg/client` |
-| npm | `@y-sweet/react` | [![npm](https://img.shields.io/npm/v/@y-sweet/react)](https://www.npmjs.com/package/@y-sweet/react) | `js-pkg/react` |
+| npm | `@arcterus-jp/sdk` | [![npm](https://img.shields.io/npm/v/@arcterus-jp/sdk)](https://www.npmjs.com/package/@arcterus-jp/sdk) | `js-pkg/sdk` |
+| npm | `@arcterus-jp/client` | [![npm](https://img.shields.io/npm/v/@arcterus-jp/client)](https://www.npmjs.com/package/@arcterus-jp/client) | `js-pkg/client` |
+| npm | `@arcterus-jp/react` | [![npm](https://img.shields.io/npm/v/@arcterus-jp/react)](https://www.npmjs.com/package/@arcterus-jp/react) | `js-pkg/react` |
 | pypi | `y-sweet-sdk` | [![pypi](https://img.shields.io/pypi/v/y-sweet-sdk)](https://pypi.org/project/y-sweet-sdk/) | `python/y_sweet_sdk` |
 
 ## Hosted Y-Sweet on Jamsocket

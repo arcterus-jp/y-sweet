@@ -41,9 +41,9 @@ fn main() {
     let server_pkg = packages.register_node_package("y-sweet", "js-pkg/server");
 
     // Node client/sdk packages
-    packages.register_node_package("@y-sweet/sdk", "js-pkg/sdk");
-    packages.register_node_package("@y-sweet/client", "js-pkg/client");
-    packages.register_node_package("@y-sweet/react", "js-pkg/react");
+    packages.register_node_package("@arcterus-jp/sdk", "js-pkg/sdk");
+    packages.register_node_package("@arcterus-jp/client", "js-pkg/client");
+    packages.register_node_package("@arcterus-jp/react", "js-pkg/react");
     packages.register_node_package("UNPUBLISHED-y-sweet-tests", "tests");
     packages.register_node_package("UNPUBLISHED-debugger", "debugger");
     packages.register_node_package("UNPUBLISHED-examples-nextjs", "examples/nextjs");
