@@ -27,10 +27,11 @@
   "files": [
     "dist/**/*"
   ],
-  "homepage": "https://github.com/drifting-in-space/y-sweet",
+  "homepage": "https://github.com/arcterus-jp/y-sweet",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/drifting-in-space/y-sweet.git"
+    "url": "git+https://github.com/arcterus-jp/y-sweet.git",
+    "directory": "js-pkg/sdk"
   },
   "license": "MIT",
   "devDependencies": {
@@ -39,7 +40,7 @@
     "typescript": "^5.1.6"
   },
   "bugs": {
-    "url": "https://github.com/drifting-in-space/y-sweet/issues"
+    "url": "https://github.com/arcterus-jp/y-sweet/issues"
   },
   "dependencies": {
     "@types/node": "^20.5.9"
