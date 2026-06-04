@@ -27,6 +27,9 @@ use y_sweet_core::{
 const DEFAULT_S3_REGION: &str = "us-east-1";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+mod telemetry;
+use crate::telemetry::init_tracing;
+
 #[derive(Parser)]
 struct Opts {
     #[clap(subcommand)]
@@ -171,7 +174,7 @@ async fn main() -> Result<()> {
     } else {
         EnvFilter::new("warn")
     };
-    let _ddtrace_guard = init_tracing(filter)?;
+    let _ddtrace_guard = init_tracing(filter, VERSION)?;
 
     match &opts.subcmd {
         ServSubcommand::Serve {
