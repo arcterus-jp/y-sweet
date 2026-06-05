@@ -1,7 +1,7 @@
 "use client";
 
 import Image from "next/image";
-import { usePresence, usePresenceSetter } from "@y-sweet/react";
+import { usePresence, usePresenceSetter } from "@arcterus-jp/react";
 import { useEffect, useState } from "react";
 import { randomColor } from "~/lib/colors";
 

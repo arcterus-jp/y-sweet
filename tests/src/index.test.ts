@@ -1,10 +1,10 @@
 import { describe, expect, test, beforeAll, afterAll } from 'vitest'
-import { DocumentManager, YSweetError } from '@y-sweet/sdk'
+import { DocumentManager, YSweetError } from '@arcterus-jp/sdk'
 import {
   createYjsProvider as createYjsProvider_,
   YSweetProviderParams,
   AuthEndpoint,
-} from '@y-sweet/react'
+} from '@arcterus-jp/react'
 import { WebSocket } from 'ws'
 import * as Y from 'yjs'
 import { Server, ServerConfiguration } from './server'

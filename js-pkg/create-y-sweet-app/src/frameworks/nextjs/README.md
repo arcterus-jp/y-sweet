@@ -1,4 +1,4 @@
-This is a [Y-Sweet](https://jamsocket.com/y-sweet) project using [Next.js](https://nextjs.org). It was bootstrapped with [`create-y-sweet-app`](https://www.npmjs.com/package/create-y-sweet-app).
+This is a [Y-Sweet](https://jamsocket.com/y-sweet) project using [Next.js](https://nextjs.org). It was bootstrapped with [`@arcterus-jp/create-y-sweet-app`](https://www.npmjs.com/package/@arcterus-jp/create-y-sweet-app).
 
 ## Getting Started
 

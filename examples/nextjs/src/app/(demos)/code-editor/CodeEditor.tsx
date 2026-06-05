@@ -1,6 +1,6 @@
 'use client'
 
-import { useAwareness, useText } from '@y-sweet/react'
+import { useAwareness, useText } from '@arcterus-jp/react'
 import { useCallback, useRef } from 'react'
 import type { CodemirrorBinding } from 'y-codemirror'
 import type { EditorFromTextArea } from 'codemirror'

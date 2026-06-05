@@ -1,5 +1,5 @@
 import * as Y from 'yjs'
-import { createYjsProvider } from '@y-sweet/client'
+import { createYjsProvider } from '@arcterus-jp/client'
 import { createColorGridUI } from './ColorGrid'
 
 const COLORS = ['#500724', '#831843', '#9d174d', '#be185d', '#db2777', '#f472b6', '#f9a8d4', null]

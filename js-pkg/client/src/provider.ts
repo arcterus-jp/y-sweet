@@ -1,4 +1,4 @@
-import { encodeClientToken, type ClientToken } from '@y-sweet/sdk'
+import { encodeClientToken, type ClientToken } from '@arcterus-jp/sdk'
 import * as decoding from 'lib0/decoding'
 import * as encoding from 'lib0/encoding'
 import * as awarenessProtocol from 'y-protocols/awareness'
@@ -377,12 +377,20 @@ export class YSweetProvider {
    * Returns a promise that resolves to true if the connection was successful, or false if the connection failed.
    */
   private attemptToConnect(clientToken: ClientToken): Promise<boolean> {
+    // disconnect()/destroy() 後にループが進んで再度ここに来た場合、
+    // setStatus(STATUS_CONNECTING) で OFFLINE を上書きしてしまうのを防ぐ。
+    if (this.status === STATUS_OFFLINE) {
+      return Promise.resolve(false)
+    }
+
     let promise = new Promise<boolean>((resolve) => {
       let statusListener = (event: YSweetStatus) => {
         if (event === STATUS_CONNECTED) {
           this.off(EVENT_CONNECTION_STATUS, statusListener)
           resolve(true)
-        } else if (event === STATUS_ERROR) {
+        } else if (event === STATUS_ERROR || event === STATUS_OFFLINE) {
+          // STATUS_OFFLINE: disconnect()/destroy() 中に attempt が進行中だった場合、
+          // ループが次の while 条件評価で抜けられるよう false を返す。
           this.off(EVENT_CONNECTION_STATUS, statusListener)
           resolve(false)
         }
@@ -417,6 +425,13 @@ export class YSweetProvider {
         clientToken = await this.ensureClientToken()
       } catch (e) {
         console.warn('Failed to get client token', e)
+
+        // disconnect()/destroy() で OFFLINE 化された場合、
+        // setStatus(STATUS_ERROR) で上書きせずループを抜ける。
+        if (this.status === STATUS_OFFLINE) {
+          break connecting
+        }
+
         this.setStatus(STATUS_ERROR)
         let timeout =
           DELAY_MS_BEFORE_RETRY_TOKEN_REFRESH *
@@ -430,6 +445,12 @@ export class YSweetProvider {
       for (let i = 0; i < RETRIES_BEFORE_TOKEN_REFRESH; i++) {
         if (await this.attemptToConnect(clientToken)) {
           this.retries = 0
+          break connecting
+        }
+
+        // disconnect()/destroy() で OFFLINE 化された場合、
+        // sleeper を新規生成して待つ前にループを抜ける。
+        if (this.status === STATUS_OFFLINE) {
           break connecting
         }
 
@@ -461,6 +482,12 @@ export class YSweetProvider {
 
   public disconnect() {
     this.setStatus(STATUS_OFFLINE)
+
+    // 待機中の backoff sleep があれば即座に解除し、
+    // 次の while 条件評価 (STATUS_OFFLINE) でループを抜けさせる。
+    this.reconnectSleeper?.wake()
+    this.clearHeartbeat()
+    this.clearConnectionTimeout()
 
     if (this.websocket) {
       this.websocket.close()
@@ -588,6 +615,22 @@ export class YSweetProvider {
 
   private websocketClose(event: CloseEvent) {
     this.emit(EVENT_CONNECTION_CLOSE, event)
+
+    // disconnect()/destroy() で意図的に閉じた場合は再接続しない。
+    // setStatus(STATUS_ERROR) で OFFLINE を上書きすると勝手に connect() が走るバグの修正。
+    if (this.status === STATUS_OFFLINE) {
+      this.clearHeartbeat()
+      this.clearConnectionTimeout()
+      awarenessProtocol.removeAwarenessStates(
+        this.awareness,
+        Array.from(this.awareness.getStates().keys()).filter(
+          (client) => client !== this.doc.clientID,
+        ),
+        this,
+      )
+      return
+    }
+
     this.setStatus(STATUS_ERROR)
     this.clearHeartbeat()
     this.clearConnectionTimeout()
@@ -605,6 +648,14 @@ export class YSweetProvider {
 
   private websocketError(event: Event) {
     this.emit(EVENT_CONNECTION_ERROR, event)
+
+    // disconnect()/destroy() で意図的に閉じた場合は再接続しない。
+    if (this.status === STATUS_OFFLINE) {
+      this.clearHeartbeat()
+      this.clearConnectionTimeout()
+      return
+    }
+
     this.setStatus(STATUS_ERROR)
     this.clearHeartbeat()
     this.clearConnectionTimeout()
@@ -635,6 +686,13 @@ export class YSweetProvider {
   }
 
   public destroy() {
+    // ループを終了させるため OFFLINE 化＋待機 sleep を起こす。
+    // これがないと destroy() 後も connect ループが永久に再接続を試みる(ゾンビ provider)。
+    this.setStatus(STATUS_OFFLINE)
+    this.reconnectSleeper?.wake()
+    this.clearHeartbeat()
+    this.clearConnectionTimeout()
+
     if (this.websocket) {
       this.websocket.close()
     }

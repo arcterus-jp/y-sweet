@@ -1,5 +1,5 @@
 import { CONNECTION_STRING } from '@/lib/config'
-import { getOrCreateDocAndToken } from '@y-sweet/sdk'
+import { getOrCreateDocAndToken } from '@arcterus-jp/sdk'
 import { NextResponse } from 'next/server'
 
 const CORS_HEADERS = {

@@ -1,4 +1,4 @@
-import { YSweetProvider } from '@y-sweet/react'
+import { YSweetProvider } from '@arcterus-jp/react'
 
 export async function waitForProviderSync(provider: YSweetProvider, timeoutMillis: number = 1_000) {
   return new Promise<void>((resolve, reject) => {

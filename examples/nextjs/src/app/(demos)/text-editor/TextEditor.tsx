@@ -1,6 +1,6 @@
 'use client'
 
-import { useText, useAwareness } from '@y-sweet/react'
+import { useText, useAwareness } from '@arcterus-jp/react'
 import { useEffect, useRef } from 'react'
 import { QuillBinding } from 'y-quill'
 import Header from '@/components/Header'

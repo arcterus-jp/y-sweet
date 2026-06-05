@@ -1,5 +1,5 @@
-import { DocumentManager } from "@y-sweet/sdk";
-import { YDocProvider } from "@y-sweet/react";
+import { DocumentManager } from "@arcterus-jp/sdk";
+import { YDocProvider } from "@arcterus-jp/react";
 
 import { App } from "@/components/App";
 

@@ -18,7 +18,7 @@
     "yjs": "^13.6.7"
   },
   "dependencies": {
-    "@y-sweet/react": "0.9.1",
-    "@y-sweet/sdk": "0.9.1"
+    "@arcterus-jp/react": "0.9.2",
+    "@arcterus-jp/sdk": "0.9.2"
   }
 }

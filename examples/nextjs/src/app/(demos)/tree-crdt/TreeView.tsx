@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { LayoutNode, NodeBox, Point } from './tree_layout'
 import { ROOT_ID, YTree, YTreeNode } from './ytree'
-import { useMap } from '@y-sweet/react'
+import { useMap } from '@arcterus-jp/react'
 import * as Y from 'yjs'
 import Paragraph from '@/components/Paragraph'
 import { Link } from '@/components/Link'

@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest'
-import { YSweetError, YSweetErrorPayload } from '@y-sweet/sdk'
+import { YSweetError, YSweetErrorPayload } from '@arcterus-jp/sdk'
 
 function expectRoundTrip(payload: YSweetErrorPayload) {
   const message = YSweetError.getMessage(payload)

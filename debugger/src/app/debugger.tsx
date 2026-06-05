@@ -1,6 +1,6 @@
 'use client'
 
-import { useAwareness, useYDoc, useYjsProvider } from '@y-sweet/react'
+import { useAwareness, useYDoc, useYjsProvider } from '@arcterus-jp/react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import * as Y from 'yjs'
 import { Debuggable, DebuggableEntry } from '../lib/debuggable'
