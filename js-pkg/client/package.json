@@ -7,7 +7,7 @@
     "format": "prettier --write \"**/*.{ts,tsx,js,jsx}\"",
     "prepublishOnly": "npm run build"
   },
-  "version": "0.9.1",
+  "version": "0.9.2",
   "description": "JS library for building collaboration features with y-sweet.",
   "main": "./dist/main.js",
   "types": "./dist/main.d.ts",
@@ -47,7 +47,7 @@
     "yjs": "^13.0.0"
   },
   "dependencies": {
-    "@arcterus-jp/sdk": "0.9.1",
+    "@arcterus-jp/sdk": "0.9.2",
     "y-protocols": "^1.0.5"
   }
 }
