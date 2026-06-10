@@ -62,6 +62,12 @@ fn current_time_epoch_millis() -> u64 {
     duration_since_epoch.as_millis() as u64
 }
 
+#[derive(Clone)]
+pub struct RoutingConfig {
+    pub server_count: u32,
+    pub server_index: u32,
+}
+
 #[derive(Debug)]
 pub struct AppError(pub StatusCode, pub anyhow::Error);
 impl std::error::Error for AppError {}
@@ -123,6 +129,7 @@ pub struct Server {
     max_body_size: Option<usize>,
     /// Whether to skip garbage collection in Yrs documents.
     skip_gc: bool,
+    routing_config: Option<RoutingConfig>,
 }
 
 impl Server {
@@ -135,6 +142,7 @@ impl Server {
         doc_gc: bool,
         max_body_size: Option<usize>,
         skip_gc: bool,
+        routing_config: Option<RoutingConfig>,
     ) -> Result<Self> {
         Ok(Self {
             docs: Arc::new(DashMap::new()),
@@ -147,6 +155,7 @@ impl Server {
             doc_gc,
             max_body_size,
             skip_gc,
+            routing_config,
         })
     }
 
@@ -534,6 +543,45 @@ impl Server {
         response
     }
 
+    fn extract_doc_id_from_path(path: &str) -> Option<&str> {
+        let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+        match segments.as_slice() {
+            ["d", doc_id, ..] => Some(doc_id),
+            ["doc", "ws", doc_id] => Some(doc_id),
+            ["doc", doc_id, ..] if *doc_id != "new" => Some(doc_id),
+            _ => None,
+        }
+    }
+
+    pub async fn routing_guard_middleware(
+        State(server): State<Arc<Server>>,
+        req: Request,
+        next: Next,
+    ) -> Result<Response, AppError> {
+        if let Some(ref config) = server.routing_config {
+            if let Some(doc_id) = Self::extract_doc_id_from_path(req.uri().path()) {
+                let hash = crc32fast::hash(doc_id.as_bytes());
+                let target_index = hash % config.server_count;
+                if target_index != config.server_index {
+                    warn!(
+                        doc_id = %doc_id,
+                        expected_server = target_index,
+                        actual_server = config.server_index,
+                        "Misdirected request: doc_id not assigned to this server"
+                    );
+                    return Err(AppError(
+                        StatusCode::MISDIRECTED_REQUEST,
+                        anyhow!(
+                            "Document {} is not assigned to this server (expected index {}, this is {})",
+                            doc_id, target_index, config.server_index
+                        ),
+                    ));
+                }
+            }
+        }
+        Ok(next.run(req).await)
+    }
+
     pub async fn redact_error_middleware(req: Request, next: Next) -> impl IntoResponse {
         let resp = next.run(req).await;
         if resp.status().is_server_error() || resp.status().is_client_error() {
@@ -560,12 +608,17 @@ impl Server {
                 "/d/:doc_id/ws/:doc_id2",
                 get(handle_socket_upgrade_full_path),
             )
-            .layer(middleware::from_fn(Self::logging_middleware))
-            .layer(OtelAxumLayer::default())
             .with_state(self.clone());
 
-        // Merge extension routes
-        base_routes.merge(crate::server_ext::ext_routes(self))
+        // Merge extension routes and apply middleware stack
+        base_routes
+            .merge(crate::server_ext::ext_routes(self))
+            .layer(middleware::from_fn_with_state(
+                self.clone(),
+                Self::routing_guard_middleware,
+            ))
+            .layer(middleware::from_fn(Self::logging_middleware))
+            .layer(OtelAxumLayer::default())
     }
 
     pub fn single_doc_routes(self: &Arc<Self>) -> Router {
@@ -1271,6 +1324,7 @@ mod test {
             true,
             None,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -1311,6 +1365,7 @@ mod test {
             true,
             None,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -1355,6 +1410,7 @@ mod test {
                 true,
                 None,
                 false,
+                None,
             )
             .await
             .unwrap(),
@@ -1403,6 +1459,7 @@ mod test {
             true,
             None,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -1441,5 +1498,54 @@ mod test {
         assert!(text_ext == ".txt" || text_ext == ".asm");
 
         assert_eq!(get_extension_from_content_type("invalid/type"), ".bin");
+    }
+
+    #[test]
+    fn test_extract_doc_id_from_path() {
+        assert_eq!(
+            Server::extract_doc_id_from_path("/d/abc123/as-update"),
+            Some("abc123")
+        );
+        assert_eq!(
+            Server::extract_doc_id_from_path("/d/abc123/ws/abc123"),
+            Some("abc123")
+        );
+        assert_eq!(
+            Server::extract_doc_id_from_path("/d/abc123/update"),
+            Some("abc123")
+        );
+        assert_eq!(
+            Server::extract_doc_id_from_path("/d/abc123/assets"),
+            Some("abc123")
+        );
+        assert_eq!(
+            Server::extract_doc_id_from_path("/d/abc123/copy"),
+            Some("abc123")
+        );
+        assert_eq!(
+            Server::extract_doc_id_from_path("/doc/ws/abc123"),
+            Some("abc123")
+        );
+        assert_eq!(
+            Server::extract_doc_id_from_path("/doc/abc123/auth"),
+            Some("abc123")
+        );
+        assert_eq!(
+            Server::extract_doc_id_from_path("/doc/abc123/as-update"),
+            Some("abc123")
+        );
+        assert_eq!(Server::extract_doc_id_from_path("/doc/new"), None);
+        assert_eq!(Server::extract_doc_id_from_path("/ready"), None);
+        assert_eq!(Server::extract_doc_id_from_path("/metrics"), None);
+        assert_eq!(Server::extract_doc_id_from_path("/check_store"), None);
+    }
+
+    #[test]
+    fn test_routing_crc32_matches_go() {
+        // Verify crc32fast::hash matches Go's crc32.ChecksumIEEE (same IEEE polynomial).
+        // Values pre-verified against Go: crc32.ChecksumIEEE([]byte("test-doc")) == 1040861620
+        assert_eq!(crc32fast::hash(b"test-doc"), 1040861620);
+        // crc32.ChecksumIEEE([]byte("abc123")) == 3473062748
+        assert_eq!(crc32fast::hash(b"abc123"), 3473062748);
     }
 }

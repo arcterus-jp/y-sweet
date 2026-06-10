@@ -14,6 +14,7 @@ use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 use url::Url;
 use y_sweet::cli::{print_auth_message, print_server_url};
+use y_sweet::server::RoutingConfig;
 use y_sweet::stores::filesystem::FileSystemStore;
 use y_sweet::tracing_setup::init_tracing;
 use y_sweet_core::{
@@ -60,6 +61,16 @@ enum ServSubcommand {
 
         #[clap(long, default_value = "false", env = "Y_SWEET_SKIP_GC")]
         skip_gc: bool,
+
+        /// Total number of y-sweet server instances (for doc_id routing guard).
+        /// Must be set together with Y_SWEET_SERVER_INDEX.
+        #[clap(long, env = "Y_SWEET_SERVER_COUNT")]
+        server_count: Option<u32>,
+
+        /// Zero-based index of this server instance (for doc_id routing guard).
+        /// Must be set together with Y_SWEET_SERVER_COUNT.
+        #[clap(long, env = "Y_SWEET_SERVER_INDEX")]
+        server_index: Option<u32>,
     },
 
     GenAuth {
@@ -184,6 +195,8 @@ async fn main() -> Result<()> {
             prod,
             max_body_size,
             skip_gc,
+            server_count,
+            server_index,
         } => {
             let auth = if let Some(auth) = auth {
                 Some(Authenticator::new(auth)?)
@@ -219,6 +232,34 @@ async fn main() -> Result<()> {
                 print_server_url(auth.as_ref(), url_prefix.as_ref(), addr);
             }
 
+            let routing_config = match (server_count, server_index) {
+                (Some(count), Some(index)) => {
+                    if *count == 0 {
+                        anyhow::bail!("Y_SWEET_SERVER_COUNT must be greater than 0");
+                    }
+                    if *index >= *count {
+                        anyhow::bail!(
+                            "Y_SWEET_SERVER_INDEX ({}) must be less than Y_SWEET_SERVER_COUNT ({})",
+                            index,
+                            count
+                        );
+                    }
+                    tracing::info!(
+                        server_index = index,
+                        server_count = count,
+                        "Routing guard enabled"
+                    );
+                    Some(RoutingConfig {
+                        server_count: *count,
+                        server_index: *index,
+                    })
+                }
+                (None, None) => None,
+                _ => anyhow::bail!(
+                    "Y_SWEET_SERVER_COUNT and Y_SWEET_SERVER_INDEX must be set together"
+                ),
+            };
+
             let token = CancellationToken::new();
 
             let server = y_sweet::server::Server::new(
@@ -230,6 +271,7 @@ async fn main() -> Result<()> {
                 true,
                 *max_body_size,
                 *skip_gc,
+                routing_config,
             )
             .await?;
 
@@ -340,6 +382,7 @@ async fn main() -> Result<()> {
                 false,
                 *max_body_size,
                 *skip_gc,
+                None, // No routing config for single-doc mode
             )
             .await?;
 
