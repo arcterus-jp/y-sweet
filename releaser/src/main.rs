@@ -49,9 +49,6 @@ fn main() {
     packages.register_node_package("UNPUBLISHED-examples-nextjs", "examples/nextjs");
     packages.register_node_package("UNPUBLISHED-examples-vanilla", "examples/vanilla");
 
-    // Python package
-    packages.register_python_package("y_sweet_sdk", "python");
-
     let args = Args::parse();
     let releaser = Releaser::new(packages);
 
