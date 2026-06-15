@@ -137,7 +137,6 @@ If the directory starts with `s3://`, Y-Sweet will treat it as an S3-compatible 
 | npm | `@arcterus-jp/sdk` | [![npm](https://img.shields.io/npm/v/@arcterus-jp/sdk)](https://www.npmjs.com/package/@arcterus-jp/sdk) | `js-pkg/sdk` |
 | npm | `@arcterus-jp/client` | [![npm](https://img.shields.io/npm/v/@arcterus-jp/client)](https://www.npmjs.com/package/@arcterus-jp/client) | `js-pkg/client` |
 | npm | `@arcterus-jp/react` | [![npm](https://img.shields.io/npm/v/@arcterus-jp/react)](https://www.npmjs.com/package/@arcterus-jp/react) | `js-pkg/react` |
-| pypi | `y-sweet-sdk` | [![pypi](https://img.shields.io/pypi/v/y-sweet-sdk)](https://pypi.org/project/y-sweet-sdk/) | `python/y_sweet_sdk` |
 
 ## Hosted Y-Sweet on Jamsocket
 
