@@ -286,9 +286,26 @@ async fn main() -> Result<()> {
                 address = %addr
             );
 
-            tokio::signal::ctrl_c()
-                .await
-                .expect("Failed to install CTRL+C signal handler");
+            // Wait for a shutdown signal. SIGTERM is what container runtimes
+            // (e.g. Kubernetes) send on pod termination / redeploy; handling it
+            // lets graceful shutdown run and close live WebSocket connections so
+            // clients reconnect to the correct node after a topology change.
+            #[cfg(unix)]
+            {
+                let mut sigterm =
+                    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                        .expect("Failed to install SIGTERM signal handler");
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = sigterm.recv() => {}
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                tokio::signal::ctrl_c()
+                    .await
+                    .expect("Failed to install CTRL+C signal handler");
+            }
 
             tracing::info!(
                 message = "Shutting down.",
