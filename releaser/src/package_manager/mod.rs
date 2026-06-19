@@ -9,7 +9,6 @@ const APP_USER_AGENT: &str = "YSweet releaser";
 
 pub mod cargo;
 pub mod node;
-pub mod python;
 
 /// This trait captures the common functionality across package systems, both for accessing
 /// local package files and for interacting with the remote package registries.
@@ -48,7 +47,6 @@ pub struct PackageInfo {
 pub enum PackageType {
     Cargo,
     Node,
-    Python,
 }
 
 impl Display for PackageType {
@@ -56,7 +54,6 @@ impl Display for PackageType {
         match self {
             PackageType::Cargo => write!(f, "Cargo"),
             PackageType::Node => write!(f, "Node"),
-            PackageType::Python => write!(f, "Python"),
         }
     }
 }
@@ -66,7 +63,6 @@ impl PackageType {
         match self {
             PackageType::Cargo => Box::new(cargo::CargoPackageManager),
             PackageType::Node => Box::new(node::NodePackageManager),
-            PackageType::Python => Box::new(python::PythonPackageManager),
         }
     }
 }

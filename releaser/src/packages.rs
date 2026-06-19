@@ -38,17 +38,6 @@ impl PackageList {
         package
     }
 
-    pub fn register_python_package(&mut self, name: &str, path: &str) -> Package {
-        let path = self.base_dir.join(path);
-        let package = Package {
-            name: name.to_string(),
-            path,
-            package_type: PackageType::Python,
-        };
-        self.packages.push(package.clone());
-        package
-    }
-
     pub fn iter(&self) -> impl Iterator<Item = &Package> {
         self.packages.iter()
     }

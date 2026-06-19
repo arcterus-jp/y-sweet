@@ -107,9 +107,6 @@ impl Releaser {
 
         // Update lockfiles
         for package in self.packages.iter() {
-            if package.package_type == PackageType::Python {
-                continue;
-            }
             println!(
                 "Updating lockfile for {} package {}",
                 style(&package.package_type).bold().red(),

@@ -1,7 +1,7 @@
 'use client'
 
-import { STATUS_CONNECTED } from '@y-sweet/client'
-import { useConnectionStatus, useHasLocalChanges } from '@y-sweet/react'
+import { STATUS_CONNECTED } from '@arcterus-jp/client'
+import { useConnectionStatus, useHasLocalChanges } from '@arcterus-jp/react'
 
 export default function StateIndicator() {
   let connectionStatus = useConnectionStatus()

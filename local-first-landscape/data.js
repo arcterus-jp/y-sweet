@@ -14,7 +14,7 @@ export const data = LandscapeSchema.make({
       comment: 'Limited only by Yjs support.',
     },
     LanguageSDK: {
-      data: ['TypeScript', 'Python'],
+      data: ['TypeScript'],
     },
     FrameworkIntegrations: {
       data: ['React'],

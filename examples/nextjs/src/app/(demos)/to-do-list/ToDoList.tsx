@@ -1,6 +1,6 @@
 'use client'
 
-import { useArray } from '@y-sweet/react'
+import { useArray } from '@arcterus-jp/react'
 import { useCallback, useState } from 'react'
 import * as Y from 'yjs'
 import Header from '@/components/Header'

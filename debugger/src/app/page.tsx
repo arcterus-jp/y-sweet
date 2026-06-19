@@ -1,7 +1,7 @@
 'use client'
 
-import { YDocProvider } from '@y-sweet/react'
-import { ClientToken, decodeClientToken } from '@y-sweet/sdk'
+import { YDocProvider } from '@arcterus-jp/react'
+import { ClientToken, decodeClientToken } from '@arcterus-jp/sdk'
 import { useEffect, useState } from 'react'
 import { Debugger } from './debugger'
 

@@ -2,5 +2,4 @@
 data
 node_modules
 .vscode
-.venv
 .envrc

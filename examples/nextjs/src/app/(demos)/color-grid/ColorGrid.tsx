@@ -1,6 +1,6 @@
 'use client'
 
-import { useMap } from '@y-sweet/react'
+import { useMap } from '@arcterus-jp/react'
 import { useState } from 'react'
 import Header from '@/components/Header'
 import StateIndicator from '@/components/StateIndicator'

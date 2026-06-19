@@ -1,16 +1,16 @@
 <img src="https://raw.githubusercontent.com/drifting-in-space/y-sweet/main/logo.svg" />
 
-# @y-sweet/react
+# @arcterus-jp/react
 
 [![GitHub Repo stars](https://img.shields.io/github/stars/drifting-in-space/y-sweet?style=social)](https://github.com/drifting-in-space/y-sweet)
 [![Chat on Discord](https://img.shields.io/static/v1?label=chat&message=discord&color=404eed)](https://discord.gg/N5sEpsuhh9)
-[![npm](https://img.shields.io/npm/v/@y-sweet/react)](https://www.npmjs.com/package/@y-sweet/react)
+[![npm](https://img.shields.io/npm/v/@arcterus-jp/react)](https://www.npmjs.com/package/@arcterus-jp/react)
 
 React library for building collaboration features with y-sweet.
 
 ## Installation
 ```
-npm install @y-sweet/react
+npm install @arcterus-jp/react
 ```
 
 ## Examples
@@ -18,13 +18,13 @@ Explore our [collaborative examples](https://github.com/drifting-in-space/y-swee
 
 All examples are open source and live in this repository, within [/examples](https://github.com/drifting-in-space/y-sweet/tree/main/examples).
 
-# Using @y-sweet/react
+# Using @arcterus-jp/react
 
 Yjs models data as a nested data structure with types like `Y.Array` corresponding to array data, `Y.Map` corresponding to objects and key/value maps, and `Y.Text` corresponding to strings. Each hook returns a Yjs type, so refer to Yjs documentation for details on how to use them.
 
 In addition to returning a Yjs type, each hook also subscribes the component to changes to that type. By default, changes to that value, _or any descendent_ of that value, triggers a rerender of the component.
 
-The `@y-sweet/react` hooks provide a way to access data for each of these types.
+The `@arcterus-jp/react` hooks provide a way to access data for each of these types.
 
 ### `useMap` is a shared object or map
 
@@ -107,7 +107,7 @@ Our [Presence](/demos/presence) demo defines presence as a map of x,y keys and c
 ```tsx Presence.tsx
 'use client'
 
-import { usePresence, usePresenceSetter } from '@y-sweet/react'
+import { usePresence, usePresenceSetter } from '@arcterus-jp/react'
 import { useCallback, useRef } from 'react'
 
 const COLORS = ['bg-red-500', 'bg-blue-500', 'bg-green-500', 'bg-purple-500', 'bg-pink-500']

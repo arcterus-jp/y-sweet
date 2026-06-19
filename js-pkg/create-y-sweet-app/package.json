@@ -1,6 +1,6 @@
 {
-  "name": "create-y-sweet-app",
-  "version": "1.0.2",
+  "name": "@arcterus-jp/create-y-sweet-app",
+  "version": "1.0.3",
   "type": "module",
   "bin": {
     "create-y-sweet-app": "src/run.js"

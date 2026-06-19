@@ -1,6 +1,6 @@
 'use client'
 
-import { useYDoc, useYjsProvider, useAwareness } from '@y-sweet/react'
+import { useYDoc, useYjsProvider, useAwareness } from '@arcterus-jp/react'
 import { useEffect, useMemo, useState } from 'react'
 import Header from '@/components/Header'
 import * as Y from 'yjs'

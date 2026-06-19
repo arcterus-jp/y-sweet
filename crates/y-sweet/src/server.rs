@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use axum::{
     body::Bytes,
     extract::{
-        ws::{Message, WebSocket},
+        ws::{CloseFrame, Message, WebSocket},
         DefaultBodyLimit, Path, Query, Request, State, WebSocketUpgrade,
     },
     http::{
@@ -61,6 +61,25 @@ fn current_time_epoch_millis() -> u64 {
     let duration_since_epoch = now.duration_since(std::time::UNIX_EPOCH).unwrap();
     duration_since_epoch.as_millis() as u64
 }
+
+#[derive(Clone)]
+pub struct RoutingConfig {
+    pub server_count: u32,
+    pub server_index: u32,
+}
+
+/// Returns `true` if `doc_id` is assigned to this server under the given routing
+/// config. Mirrors the check in `routing_guard_middleware` and must stay in sync
+/// with the BE-side `loadBalancing` (CRC32 IEEE % server_count).
+fn doc_belongs_to_server(config: &RoutingConfig, doc_id: &str) -> bool {
+    let target_index = crc32fast::hash(doc_id.as_bytes()) % config.server_count;
+    target_index == config.server_index
+}
+
+/// WebSocket close code sent when a live connection is found to be routed to the
+/// wrong server (doc reassigned to another node). In the application-private
+/// range (4000-4999); the FE uses it to trigger an immediate re-routing.
+const WS_CLOSE_MISDIRECTED: u16 = 4421;
 
 #[derive(Debug)]
 pub struct AppError(pub StatusCode, pub anyhow::Error);
@@ -123,6 +142,7 @@ pub struct Server {
     max_body_size: Option<usize>,
     /// Whether to skip garbage collection in Yrs documents.
     skip_gc: bool,
+    routing_config: Option<RoutingConfig>,
 }
 
 impl Server {
@@ -135,6 +155,7 @@ impl Server {
         doc_gc: bool,
         max_body_size: Option<usize>,
         skip_gc: bool,
+        routing_config: Option<RoutingConfig>,
     ) -> Result<Self> {
         Ok(Self {
             docs: Arc::new(DashMap::new()),
@@ -147,6 +168,7 @@ impl Server {
             doc_gc,
             max_body_size,
             skip_gc,
+            routing_config,
         })
     }
 
@@ -534,6 +556,45 @@ impl Server {
         response
     }
 
+    fn extract_doc_id_from_path(path: &str) -> Option<&str> {
+        let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+        match segments.as_slice() {
+            ["d", doc_id, ..] => Some(doc_id),
+            ["doc", "ws", doc_id] => Some(doc_id),
+            ["doc", doc_id, ..] if *doc_id != "new" => Some(doc_id),
+            _ => None,
+        }
+    }
+
+    pub async fn routing_guard_middleware(
+        State(server): State<Arc<Server>>,
+        req: Request,
+        next: Next,
+    ) -> Result<Response, AppError> {
+        if let Some(ref config) = server.routing_config {
+            if let Some(doc_id) = Self::extract_doc_id_from_path(req.uri().path()) {
+                let hash = crc32fast::hash(doc_id.as_bytes());
+                let target_index = hash % config.server_count;
+                if target_index != config.server_index {
+                    warn!(
+                        doc_id = %doc_id,
+                        expected_server = target_index,
+                        actual_server = config.server_index,
+                        "Misdirected request: doc_id not assigned to this server"
+                    );
+                    return Err(AppError(
+                        StatusCode::MISDIRECTED_REQUEST,
+                        anyhow!(
+                            "Document {} is not assigned to this server (expected index {}, this is {})",
+                            doc_id, target_index, config.server_index
+                        ),
+                    ));
+                }
+            }
+        }
+        Ok(next.run(req).await)
+    }
+
     pub async fn redact_error_middleware(req: Request, next: Next) -> impl IntoResponse {
         let resp = next.run(req).await;
         if resp.status().is_server_error() || resp.status().is_client_error() {
@@ -560,12 +621,17 @@ impl Server {
                 "/d/:doc_id/ws/:doc_id2",
                 get(handle_socket_upgrade_full_path),
             )
-            .layer(middleware::from_fn(Self::logging_middleware))
-            .layer(OtelAxumLayer::default())
             .with_state(self.clone());
 
-        // Merge extension routes
-        base_routes.merge(crate::server_ext::ext_routes(self))
+        // Merge extension routes and apply middleware stack
+        base_routes
+            .merge(crate::server_ext::ext_routes(self))
+            .layer(middleware::from_fn_with_state(
+                self.clone(),
+                Self::routing_guard_middleware,
+            ))
+            .layer(middleware::from_fn(Self::logging_middleware))
+            .layer(OtelAxumLayer::default())
     }
 
     pub fn single_doc_routes(self: &Arc<Self>) -> Router {
@@ -772,6 +838,7 @@ async fn handle_socket_upgrade(
     let awareness = dwskv.awareness();
     let connection_count = dwskv.connection_count();
     let cancellation_token = server_state.cancellation_token.clone();
+    let routing_config = server_state.routing_config.clone();
 
     Ok(ws.on_upgrade(move |socket| {
         let span = tracing::info_span!("ws.session", doc_id = %doc_id);
@@ -782,6 +849,7 @@ async fn handle_socket_upgrade(
             connection_count,
             authorization,
             cancellation_token,
+            routing_config,
         )
         .instrument(span)
     }))
@@ -852,12 +920,21 @@ async fn handle_socket(
     connection_count: Arc<AtomicUsize>,
     authorization: Authorization,
     cancellation_token: CancellationToken,
+    routing_config: Option<RoutingConfig>,
 ) {
     connection_count.fetch_add(1, Ordering::Relaxed);
     let _conn_guard = ConnectionGuard(connection_count);
 
     let (mut sink, mut stream) = socket.split();
     let (send, mut recv) = channel(1024);
+
+    // `doc_id` is moved into `DocConnection` below, so keep a copy for the
+    // periodic routing re-check in the main loop.
+    let routing_doc_id = doc_id.clone();
+    // Signals the sink task to send a Close frame when this server is no longer
+    // responsible for the doc (topology change), so the FE can re-route.
+    let reroute_token = CancellationToken::new();
+    let reroute_token_sink = reroute_token.clone();
 
     info!(
         message = "WebSocket connected",
@@ -907,6 +984,15 @@ async fn handle_socket(
                     }
                     let _ = sink.send(Message::Ping(vec![])).await;
                 }
+                _ = reroute_token_sink.cancelled() => {
+                    let _ = sink
+                        .send(Message::Close(Some(CloseFrame {
+                            code: WS_CLOSE_MISDIRECTED,
+                            reason: "document reassigned to another server".into(),
+                        })))
+                        .await;
+                    break;
+                }
             }
         }
     });
@@ -921,6 +1007,13 @@ async fn handle_socket(
             );
         }
     });
+
+    // Periodically re-evaluate whether this server still owns the doc. The
+    // handshake guard (`routing_guard_middleware`) only rejects new connections;
+    // this catches live connections whose doc has been reassigned (topology
+    // change) and closes them so the FE re-routes to the correct node.
+    let mut routing_ticker = tokio::time::interval(PING_EVERY);
+    routing_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     let mut message_count = 0u64;
     loop {
@@ -987,6 +1080,22 @@ async fn handle_socket(
                     reason = "server_shutdown"
                 );
                 break;
+            }
+            _ = routing_ticker.tick() => {
+                if let Some(ref config) = routing_config {
+                    if !doc_belongs_to_server(config, &routing_doc_id) {
+                        warn!(
+                            message = "WebSocket closed: document reassigned to another server",
+                            event = "websocket_misdirected_close",
+                            doc_id = %routing_doc_id,
+                            total_messages = %message_count,
+                            reason = "misdirected"
+                        );
+                        // Ask the sink task to send a Close(4421) frame, then exit.
+                        reroute_token.cancel();
+                        break;
+                    }
+                }
             }
         }
     }
@@ -1271,6 +1380,7 @@ mod test {
             true,
             None,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -1311,6 +1421,7 @@ mod test {
             true,
             None,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -1355,6 +1466,7 @@ mod test {
                 true,
                 None,
                 false,
+                None,
             )
             .await
             .unwrap(),
@@ -1403,6 +1515,7 @@ mod test {
             true,
             None,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -1441,5 +1554,100 @@ mod test {
         assert!(text_ext == ".txt" || text_ext == ".asm");
 
         assert_eq!(get_extension_from_content_type("invalid/type"), ".bin");
+    }
+
+    #[test]
+    fn test_extract_doc_id_from_path() {
+        assert_eq!(
+            Server::extract_doc_id_from_path("/d/abc123/as-update"),
+            Some("abc123")
+        );
+        assert_eq!(
+            Server::extract_doc_id_from_path("/d/abc123/ws/abc123"),
+            Some("abc123")
+        );
+        assert_eq!(
+            Server::extract_doc_id_from_path("/d/abc123/update"),
+            Some("abc123")
+        );
+        assert_eq!(
+            Server::extract_doc_id_from_path("/d/abc123/assets"),
+            Some("abc123")
+        );
+        assert_eq!(
+            Server::extract_doc_id_from_path("/d/abc123/copy"),
+            Some("abc123")
+        );
+        assert_eq!(
+            Server::extract_doc_id_from_path("/doc/ws/abc123"),
+            Some("abc123")
+        );
+        assert_eq!(
+            Server::extract_doc_id_from_path("/doc/abc123/auth"),
+            Some("abc123")
+        );
+        assert_eq!(
+            Server::extract_doc_id_from_path("/doc/abc123/as-update"),
+            Some("abc123")
+        );
+        assert_eq!(Server::extract_doc_id_from_path("/doc/new"), None);
+        assert_eq!(Server::extract_doc_id_from_path("/ready"), None);
+        assert_eq!(Server::extract_doc_id_from_path("/metrics"), None);
+        assert_eq!(Server::extract_doc_id_from_path("/check_store"), None);
+    }
+
+    #[test]
+    fn test_routing_crc32_matches_go() {
+        // Verify crc32fast::hash matches Go's crc32.ChecksumIEEE (same IEEE polynomial).
+        // Values pre-verified against Go: crc32.ChecksumIEEE([]byte("test-doc")) == 1040861620
+        assert_eq!(crc32fast::hash(b"test-doc"), 1040861620);
+        // crc32.ChecksumIEEE([]byte("abc123")) == 3473062748
+        assert_eq!(crc32fast::hash(b"abc123"), 3473062748);
+    }
+
+    #[test]
+    fn test_doc_belongs_to_server() {
+        // From BE_ROUTING_GUARD_SPEC.md: "abc123" -> %2 == 0, %3 == 1.
+        // server_count = 2: abc123 belongs to index 0, not index 1.
+        assert!(doc_belongs_to_server(
+            &RoutingConfig {
+                server_count: 2,
+                server_index: 0,
+            },
+            "abc123"
+        ));
+        assert!(!doc_belongs_to_server(
+            &RoutingConfig {
+                server_count: 2,
+                server_index: 1,
+            },
+            "abc123"
+        ));
+
+        // server_count = 3: 3473062748 % 3 == 2, so abc123 belongs to index 2
+        // only. A connection that was valid under a count=2 topology (index 0)
+        // becomes misdirected after a scale-up to count=3 unless this is index 2
+        // (the topology-change case the live re-check guards against).
+        assert!(doc_belongs_to_server(
+            &RoutingConfig {
+                server_count: 3,
+                server_index: 2,
+            },
+            "abc123"
+        ));
+        assert!(!doc_belongs_to_server(
+            &RoutingConfig {
+                server_count: 3,
+                server_index: 0,
+            },
+            "abc123"
+        ));
+        assert!(!doc_belongs_to_server(
+            &RoutingConfig {
+                server_count: 3,
+                server_index: 1,
+            },
+            "abc123"
+        ));
     }
 }

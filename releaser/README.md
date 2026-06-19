@@ -3,7 +3,7 @@ Releasing Y-Sweet
 
 **Note: this is only relevant to developers of Y-Sweet with publishing permissions. Regular users of Y-Sweet can ignore this crate.**
 
-This Y-Sweet repo contains a number of packages in different languages, including the server in Rust and SDKs in JavaScript and Python.
+This Y-Sweet repo contains a number of packages in different languages, including the server in Rust and SDKs in JavaScript.
 
 Because new functionality may be exposed in the server API that needs to be supported in the SDKs, we keep version numbers across all packages in lockstep.
 
@@ -46,5 +46,5 @@ cargo run -- publish
 
 This will:
 - Check if the binaries have been published (this will fail if the previous step hasn't been completed)
-- Compare the version of each package with the published version (on npm, crates.io, pypi)
+- Compare the version of each package with the published version (on npm, crates.io)
 - Publish each package that has a different published version
