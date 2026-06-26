@@ -231,15 +231,21 @@ impl DocConnection {
         Ok(())
     }
 
-    /// Process a batch of incoming messages, applying all CRDT updates in a
-    /// single write-lock acquisition to minimize lock contention under burst
-    /// load.
+    /// Process a batch of incoming messages, applying all writable CRDT updates
+    /// in a single write-lock acquisition to minimize lock contention under
+    /// burst load.
     ///
-    /// All `SyncMessage::Update` messages are collected and applied within one
-    /// `transact_mut()` call, so the broadcast observer in `DocWithSyncKv` fires
-    /// only once per batch. Non-Update messages (SyncStep1, SyncStep2, Auth,
-    /// Awareness, etc.) are processed individually, in order, after the batched
-    /// updates. Responses are sent via the connection callback.
+    /// Writable `SyncMessage::Update` messages are collected and applied within
+    /// one `transact_mut()` call, so the broadcast observer in `DocWithSyncKv`
+    /// fires only once per batch. All other messages (SyncStep1, SyncStep2,
+    /// Auth, Awareness, and — for read-only connections — Update) are processed
+    /// individually, in order, after the batched updates, with responses sent
+    /// via the connection callback.
+    ///
+    /// Per-message errors (e.g. a read-only client attempting a write, or an
+    /// undecodable frame) are logged and skipped rather than aborting the whole
+    /// batch — mirroring the single-message [`send`](Self::send) path, which the
+    /// caller invokes one message at a time.
     #[cfg(feature = "sync")]
     pub async fn send_batch(&self, updates: &[Vec<u8>]) -> Result<(), anyhow::Error> {
         if updates.is_empty() {
@@ -260,42 +266,56 @@ impl DocConnection {
 
         let can_write = matches!(self.authorization, Authorization::Full);
 
-        // Identify CRDT update messages so they can share one transaction, and
-        // remember the order of all other messages for individual processing.
-        let mut other_indices: Vec<usize> = Vec::new();
-        let mut has_crdt_updates = false;
-
-        for (i, raw) in updates.iter().enumerate() {
-            match Message::decode_v1(raw)? {
-                Message::Sync(SyncMessage::Update(_)) if can_write => {
-                    has_crdt_updates = true;
+        // Decode each frame once. Writable CRDT updates are set aside to share a
+        // single transaction; everything else keeps its original order for
+        // individual processing. Undecodable frames are logged and skipped.
+        let mut writable_updates: Vec<Vec<u8>> = Vec::new();
+        let mut others: Vec<Message> = Vec::new();
+        for raw in updates {
+            match Message::decode_v1(raw) {
+                Ok(Message::Sync(SyncMessage::Update(u))) if can_write => {
+                    writable_updates.push(u);
                 }
-                _ => other_indices.push(i),
+                Ok(msg) => others.push(msg),
+                Err(e) => {
+                    tracing::warn!(
+                        message = "Failed to decode batched message",
+                        event = "websocket_batch_decode_error",
+                        error = %e,
+                    );
+                }
             }
         }
 
-        // Apply all CRDT updates in a single transaction. The broadcast observer
-        // fires exactly once when the transaction is committed (on drop),
-        // regardless of how many updates were batched.
-        if has_crdt_updates {
+        // Apply all writable CRDT updates in a single transaction. The broadcast
+        // observer fires exactly once when the transaction is committed (on
+        // drop), regardless of how many updates were batched.
+        if !writable_updates.is_empty() {
             let awareness = self.awareness.write().unwrap();
             let mut txn = awareness.doc().transact_mut();
-            for raw in updates {
-                if let Ok(Message::Sync(SyncMessage::Update(u))) = Message::decode_v1(raw) {
-                    if let Ok(update) = Update::decode_v1(&u) {
-                        txn.apply_update(update);
-                    }
+            for u in &writable_updates {
+                if let Ok(update) = Update::decode_v1(u) {
+                    txn.apply_update(update);
                 }
             }
             // Transaction commits (and the observer fires once) when txn drops.
         }
 
-        // Process all non-Update messages individually, preserving their order.
-        for &i in &other_indices {
-            let msg = Message::decode_v1(&updates[i])?;
-            if let Some(result) = self.handle_msg(&DefaultProtocol, msg)? {
-                let msg = result.encode_v1();
-                (self.callback)(&msg);
+        // Process the remaining messages in order. A per-message error here is
+        // expected (e.g. read-only write attempts return PermissionDenied) and
+        // must not abort the rest of the batch — notably the SyncStep1 that
+        // follows a rejected SyncStep2 during the read-only handshake.
+        for msg in others {
+            match self.handle_msg(&DefaultProtocol, msg) {
+                Ok(Some(result)) => (self.callback)(&result.encode_v1()),
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        message = "Batched message handling error",
+                        event = "websocket_batch_message_error",
+                        error = %e,
+                    );
+                }
             }
         }
 
@@ -378,5 +398,122 @@ impl Drop for DocConnection {
             let mut awareness = self.awareness.write().unwrap();
             awareness.remove_state(*client_id);
         }
+    }
+}
+
+#[cfg(all(test, feature = "sync"))]
+mod tests {
+    use super::*;
+    use crate::sync::awareness::Awareness;
+    use std::sync::Mutex;
+    use yrs::{Doc, GetString, Text, Transact};
+
+    /// Collects every message the connection emits via its callback.
+    fn collecting_connection(
+        authorization: Authorization,
+    ) -> (DocConnection, Arc<Mutex<Vec<Vec<u8>>>>) {
+        let doc = Doc::new();
+        let awareness = Arc::new(RwLock::new(Awareness::new(doc)));
+        let sink = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+        let sink_cb = sink.clone();
+        let connection = DocConnection::new(
+            "test-doc".to_string(),
+            awareness,
+            authorization,
+            move |bytes| sink_cb.lock().unwrap().push(bytes.to_vec()),
+        );
+        (connection, sink)
+    }
+
+    /// Encode a SyncStep2 carrying the full state of a doc that contains some text.
+    fn sync_step2_with_text(text: &str) -> Vec<u8> {
+        let doc = Doc::new();
+        let txt = doc.get_or_insert_text("content");
+        txt.push(&mut doc.transact_mut(), text);
+        let update = doc
+            .transact()
+            .encode_state_as_update_v1(&yrs::StateVector::default());
+        Message::Sync(SyncMessage::SyncStep2(update)).encode_v1()
+    }
+
+    fn sync_step1_empty() -> Vec<u8> {
+        Message::Sync(SyncMessage::SyncStep1(yrs::StateVector::default())).encode_v1()
+    }
+
+    /// Regression test: a read-only client's handshake batches its
+    /// `[SyncStep2, SyncStep1]` together. The rejected SyncStep2
+    /// (PermissionDenied) must NOT abort the batch — the server still has to
+    /// answer the trailing SyncStep1 with its own SyncStep2, or the client never
+    /// completes sync. See the `read-only over websocket` integration test.
+    #[tokio::test]
+    async fn read_only_batch_does_not_drop_sync_step1_response() {
+        let (connection, sink) = collecting_connection(Authorization::ReadOnly);
+        // Discard the handshake messages emitted by `new`.
+        sink.lock().unwrap().clear();
+
+        let batch = vec![sync_step2_with_text("hello"), sync_step1_empty()];
+        connection.send_batch(&batch).await.unwrap();
+
+        let responses = sink.lock().unwrap().clone();
+        let got_step2 = responses.iter().any(|raw| {
+            matches!(
+                Message::decode_v1(raw),
+                Ok(Message::Sync(SyncMessage::SyncStep2(_)))
+            )
+        });
+        assert!(
+            got_step2,
+            "read-only batch should still answer SyncStep1 with a SyncStep2 (got {} messages)",
+            responses.len()
+        );
+    }
+
+    /// A writable client batching several `Update`s applies them all in one
+    /// transaction, and a trailing SyncStep1 is answered with the post-update
+    /// state.
+    #[tokio::test]
+    async fn writable_batch_applies_updates_and_answers_sync_step1() {
+        let (connection, sink) = collecting_connection(Authorization::Full);
+        sink.lock().unwrap().clear();
+
+        // Two updates to the same text field, plus a SyncStep1 asking for state.
+        let mut batch = Vec::new();
+        for chunk in ["foo", "bar"] {
+            let doc = Doc::new();
+            let txt = doc.get_or_insert_text("content");
+            txt.push(&mut doc.transact_mut(), chunk);
+            let update = doc
+                .transact()
+                .encode_state_as_update_v1(&yrs::StateVector::default());
+            batch.push(Message::Sync(SyncMessage::Update(update)).encode_v1());
+        }
+        batch.push(sync_step1_empty());
+
+        connection.send_batch(&batch).await.unwrap();
+
+        // The connection's awareness doc must reflect both updates.
+        let merged = {
+            let awareness = connection.awareness.read().unwrap();
+            let doc = awareness.doc();
+            let txt = doc.get_or_insert_text("content");
+            let txn = doc.transact();
+            let s = txt.get_string(&txn);
+            drop(txn);
+            s
+        };
+        assert!(
+            merged.contains("foo") && merged.contains("bar"),
+            "batched updates were not all applied: {merged:?}"
+        );
+
+        // And the trailing SyncStep1 produced a SyncStep2 response.
+        let responses = sink.lock().unwrap().clone();
+        assert!(
+            responses.iter().any(|raw| matches!(
+                Message::decode_v1(raw),
+                Ok(Message::Sync(SyncMessage::SyncStep2(_)))
+            )),
+            "writable batch should answer SyncStep1 with a SyncStep2"
+        );
     }
 }
