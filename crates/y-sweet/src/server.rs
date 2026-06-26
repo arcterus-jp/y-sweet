@@ -30,7 +30,10 @@ use std::{
 };
 use tokio::{
     net::TcpListener,
-    sync::mpsc::{channel, Receiver},
+    sync::{
+        broadcast,
+        mpsc::{channel, Receiver},
+    },
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{error, info, span, warn, Instrument, Level};
@@ -44,9 +47,10 @@ use y_sweet_core::{
     doc_connection::DocConnection,
     doc_sync::DocWithSyncKv,
     store::Store,
-    sync::awareness::Awareness,
+    sync::{awareness::Awareness, Message as YSyncMessage, SyncMessage as YSyncSyncMessage},
     sync_kv::SyncKv,
 };
+use yrs::{updates::encoder::Encode, ReadTxn, StateVector, Transact};
 
 const PLANE_VERIFIED_USER_DATA_HEADER: &str = "x-verified-user-data";
 
@@ -55,6 +59,8 @@ const PING_EVERY: Duration = Duration::from_secs(20);
 // If we haven't received a pong in the last 40 seconds, we close the connection.
 // All modern browsers will respond to websocket pings with a pong message.
 const PONG_TIMEOUT: Duration = Duration::from_secs(40);
+// Maximum number of incoming WebSocket messages to collect and apply in one batch.
+const MAX_BATCH_SIZE: usize = 64;
 
 fn current_time_epoch_millis() -> u64 {
     let now = std::time::SystemTime::now();
@@ -837,6 +843,10 @@ async fn handle_socket_upgrade(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     let awareness = dwskv.awareness();
     let connection_count = dwskv.connection_count();
+    // Subscribe to the document's broadcast channels before the upgrade so no
+    // updates are missed between this point and the start of `handle_socket`.
+    let doc_update_rx = dwskv.subscribe_doc_updates();
+    let awareness_update_rx = dwskv.subscribe_awareness_updates();
     let cancellation_token = server_state.cancellation_token.clone();
     let routing_config = server_state.routing_config.clone();
 
@@ -846,6 +856,8 @@ async fn handle_socket_upgrade(
             socket,
             doc_id,
             awareness,
+            doc_update_rx,
+            awareness_update_rx,
             connection_count,
             authorization,
             cancellation_token,
@@ -913,10 +925,13 @@ impl Drop for ConnectionGuard {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_socket(
     socket: WebSocket,
     doc_id: String,
     awareness: Arc<RwLock<Awareness>>,
+    mut doc_update_rx: broadcast::Receiver<Vec<u8>>,
+    mut awareness_update_rx: broadcast::Receiver<Vec<u8>>,
     connection_count: Arc<AtomicUsize>,
     authorization: Authorization,
     cancellation_token: CancellationToken,
@@ -926,7 +941,10 @@ async fn handle_socket(
     let _conn_guard = ConnectionGuard(connection_count);
 
     let (mut sink, mut stream) = socket.split();
-    let (send, mut recv) = channel(1024);
+    // Outgoing channel: DocConnection callback (SyncStep2, etc.) → WebSocket sink.
+    let (send_tx, mut send_rx) = channel::<Vec<u8>>(1024);
+    // Incoming channel: WebSocket stream (forward task) → batch processor.
+    let (incoming_tx, mut incoming_rx) = channel::<Vec<u8>>(256);
 
     // `doc_id` is moved into `DocConnection` below, so keep a copy for the
     // periodic routing re-check in the main loop.
@@ -947,38 +965,103 @@ async fn handle_socket(
 
     let last_pong = Arc::new(RwLock::new(tokio::time::Instant::now()));
     let last_pong_clone = last_pong.clone();
+    let awareness_for_resync = awareness.clone();
 
+    // Sender task: routes outgoing messages from several sources to the sink:
+    //   1. `send_rx`            — direct replies from the DocConnection callback
+    //                             (SyncStep2, auth responses, etc.)
+    //   2. `doc_update_rx`      — pre-encoded MSG_SYNC_UPDATE from the broadcast
+    //                             channel in DocWithSyncKv
+    //   3. `awareness_update_rx`— pre-encoded awareness updates from the broadcast
+    //                             channel
+    //
+    // Broadcasting pre-encoded bytes keeps the document write-lock hold time O(1)
+    // per update instead of the previous O(N) (one observer callback per client).
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(PING_EVERY);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         loop {
             tokio::select! {
-                msg = recv.recv() => {
+                // Direct replies from the DocConnection callback.
+                msg = send_rx.recv() => {
                     let Some(msg) = msg else {
                         break;
                     };
-                    if let Err(e) = sink.send(Message::Binary(msg)).await {
-                        let error_message = format!("WebSocket send error: {}", e);
-                        let error_str = e.to_string();
-                        if error_str.contains("Sending after closing") {
-                            warn!(
-                                message = %error_message,
-                                event = "websocket_send_after_close",
-                                error = %e
-                            );
-                        } else {
-                            error!(
-                                message = %error_message,
-                                event = "websocket_send_error",
-                                error = %e
-                            );
-                        }
+                    if !sink_send_binary(&mut sink, msg).await {
                         break;
                     }
                 }
+                // Pre-encoded MSG_SYNC_UPDATE messages from the doc broadcast channel.
+                result = doc_update_rx.recv() => {
+                    match result {
+                        Ok(encoded_msg) => {
+                            if !sink_send_binary(&mut sink, encoded_msg).await {
+                                break;
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            // This receiver fell behind and missed `n` updates;
+                            // re-sync by sending the full current document state.
+                            warn!(
+                                message = "WebSocket doc receiver lagged, sending full state",
+                                event = "websocket_doc_lagged",
+                                missed = n,
+                            );
+                            // Encode the full state while holding the lock, then drop
+                            // the guard BEFORE the .await (the guard is not Send).
+                            let resync_msg = awareness_for_resync.read().ok().map(|awareness| {
+                                let update = awareness
+                                    .doc()
+                                    .transact()
+                                    .encode_state_as_update_v1(&StateVector::default());
+                                YSyncMessage::Sync(YSyncSyncMessage::SyncStep2(update)).encode_v1()
+                            });
+                            if let Some(msg) = resync_msg {
+                                if !sink_send_binary(&mut sink, msg).await {
+                                    break;
+                                }
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+                // Pre-encoded awareness update messages from the awareness broadcast channel.
+                result = awareness_update_rx.recv() => {
+                    match result {
+                        Ok(encoded_msg) => {
+                            if !sink_send_binary(&mut sink, encoded_msg).await {
+                                break;
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            warn!(
+                                message = "WebSocket awareness receiver lagged, sending full state",
+                                event = "websocket_awareness_lagged",
+                                missed = n,
+                            );
+                            let resync_msg = awareness_for_resync.read().ok().and_then(|awareness| {
+                                awareness
+                                    .update()
+                                    .ok()
+                                    .map(|update| YSyncMessage::Awareness(update).encode_v1())
+                            });
+                            if let Some(msg) = resync_msg {
+                                if !sink_send_binary(&mut sink, msg).await {
+                                    break;
+                                }
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    }
+                }
                 _ = ticker.tick() => {
-                    if last_pong_clone.read().expect("Failed to get read lock on last_pong").elapsed() > PONG_TIMEOUT {
+                    if last_pong_clone
+                        .read()
+                        .expect("Failed to get read lock on last_pong")
+                        .elapsed()
+                        > PONG_TIMEOUT
+                    {
                         tracing::info!("Pong timeout, closing connection");
                         break;
                     }
@@ -997,8 +1080,61 @@ async fn handle_socket(
         }
     });
 
+    // Forward task: reads the WebSocket stream, handles control frames (Pong,
+    // Close), and forwards binary messages to the incoming channel for batching.
+    let last_pong_fwd = last_pong.clone();
+    let mut stream_task = {
+        let incoming_tx = incoming_tx.clone();
+        tokio::spawn(async move {
+            loop {
+                match stream.next().await {
+                    Some(Ok(Message::Binary(bytes))) => {
+                        if incoming_tx.send(bytes).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) => {
+                        info!(
+                            message = "WebSocket closed by client",
+                            event = "websocket_closed",
+                            reason = "client_close"
+                        );
+                        break;
+                    }
+                    Some(Ok(Message::Pong(_))) => {
+                        *last_pong_fwd
+                            .write()
+                            .expect("Failed to get write lock on last_pong") =
+                            tokio::time::Instant::now();
+                    }
+                    Some(Err(e)) => {
+                        // The stream will complain about things like connections
+                        // being lost without handshake.
+                        let error_message = format!("WebSocket stream error: {}", e);
+                        warn!(
+                            message = %error_message,
+                            event = "websocket_stream_error",
+                            error = %e
+                        );
+                    }
+                    Some(msg) => {
+                        let error_message = format!("WebSocket invalid message: {:?}", msg);
+                        warn!(
+                            message = %error_message,
+                            event = "websocket_invalid_message",
+                        );
+                    }
+                    None => break,
+                }
+            }
+        })
+    };
+    // Drop the main task's copy of incoming_tx so that once the stream task exits,
+    // `incoming_rx.recv()` returns None and the batch loop below exits cleanly.
+    drop(incoming_tx);
+
     let connection = DocConnection::new(doc_id, awareness, authorization, move |bytes| {
-        if let Err(e) = send.try_send(bytes.to_vec()) {
+        if let Err(e) = send_tx.try_send(bytes.to_vec()) {
             let error_message = format!("WebSocket message error: {}", e);
             warn!(
                 message = %error_message,
@@ -1015,54 +1151,32 @@ async fn handle_socket(
     let mut routing_ticker = tokio::time::interval(PING_EVERY);
     routing_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
+    // Batch processing loop: wait for the first incoming message, then drain any
+    // additional buffered messages (via try_recv) and apply them all in one
+    // `DocConnection::send_batch` call. Batching multiple CRDT updates into a
+    // single transaction reduces write-lock acquisitions under burst load.
     let mut message_count = 0u64;
     loop {
         tokio::select! {
-            msg = stream.next() => {
-                let Some(msg) = msg else {
+            bytes = incoming_rx.recv() => {
+                let Some(bytes) = bytes else {
+                    // Forward task exited (client disconnected / stream ended).
                     break;
                 };
-                let msg = match msg {
-                    Ok(Message::Binary(bytes)) => {
-                        message_count += 1;
-                        bytes
-                    }
-                    Ok(Message::Close(_)) => {
-                        info!(
-                            message = "WebSocket closed by client",
-                            event = "websocket_closed",
-                            total_messages = %message_count,
-                            reason = "client_close"
-                        );
-                        break;
-                    }
-                    Ok(Message::Pong(_)) => {
-                        *last_pong.write().expect("Failed to get write lock on last_pong") = tokio::time::Instant::now();
-                        continue;
-                    }
-                    Err(e) => {
-                        // The stream will complain about things like
-                        // connections being lost without handshake.
-                        let error_message = format!("WebSocket stream error: {}", e);
-                        warn!(
-                            message = %error_message,
-                            event = "websocket_stream_error",
-                            error = %e
-                        );
-                        continue;
-                    }
-                    msg => {
-                        let error_message = format!("WebSocket invalid message: {:?}", msg);
-                        warn!(
-                            message = %error_message,
-                            event = "websocket_invalid_message",
-                            message = ?msg
-                        );
-                        continue;
-                    }
-                };
+                message_count += 1;
 
-                if let Err(e) = connection.send(&msg).await {
+                let mut batch = vec![bytes];
+                while batch.len() < MAX_BATCH_SIZE {
+                    match incoming_rx.try_recv() {
+                        Ok(b) => {
+                            message_count += 1;
+                            batch.push(b);
+                        }
+                        Err(_) => break,
+                    }
+                }
+
+                if let Err(e) = connection.send_batch(&batch).await {
                     let error_message = format!("WebSocket message handling error: {}", e);
                     error!(
                         message = %error_message,
@@ -1097,13 +1211,48 @@ async fn handle_socket(
                     }
                 }
             }
+            _ = &mut stream_task => {
+                info!(
+                    message = "WebSocket stream task ended",
+                    event = "websocket_closed",
+                    total_messages = %message_count,
+                    reason = "stream_ended"
+                );
+                break;
+            }
         }
     }
 
-    // Close状態でのメッセージ送信を防ぐため、即座にDocConnectionをdropする
-    // これによりclosedフラグがセットされ、サブスクリプションコールバックが
-    // 新しいメッセージをキューするのを止める
+    stream_task.abort();
+    // Drop DocConnection to clean up this client's awareness state.
     drop(connection);
+}
+
+/// Send a binary frame to the sink, logging send errors. Returns `false` if the
+/// send failed and the caller should stop the sender loop.
+async fn sink_send_binary(
+    sink: &mut futures::stream::SplitSink<WebSocket, Message>,
+    msg: Vec<u8>,
+) -> bool {
+    if let Err(e) = sink.send(Message::Binary(msg)).await {
+        let error_message = format!("WebSocket send error: {}", e);
+        let error_str = e.to_string();
+        if error_str.contains("Sending after closing") {
+            warn!(
+                message = %error_message,
+                event = "websocket_send_after_close",
+                error = %e
+            );
+        } else {
+            error!(
+                message = %error_message,
+                event = "websocket_send_error",
+                error = %e
+            );
+        }
+        return false;
+    }
+    true
 }
 
 async fn check_store(
