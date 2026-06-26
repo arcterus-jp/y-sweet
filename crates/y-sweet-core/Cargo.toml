@@ -9,7 +9,10 @@ repository = "https://github.com/drifting-in-space/y-sweet"
 
 [features]
 default = ["sync"]
-sync = ["yrs/sync"]
+# `dep:tokio` pulls in tokio::sync::broadcast for the broadcast fan-out used by
+# the native (multi-threaded) server. The wasm worker builds with
+# `default-features = false`, so it never compiles tokio.
+sync = ["yrs/sync", "dep:tokio"]
 single-threaded = []
 
 [dependencies]
@@ -36,6 +39,7 @@ serde_json = "1.0.103"
 sha2 = "0.10.7"
 thiserror = "1.0.44"
 time = { version = "0.3.25", features = ["wasm-bindgen"] }
+tokio = { version = "1.29.1", features = ["sync"], optional = true }  # Required for broadcast channels (sync feature only)
 tracing = "0.1.37"
 yrs = { version = "0.19.1" }
 yrs-kvstore = "0.3.0"
